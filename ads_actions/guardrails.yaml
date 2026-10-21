@@ -1,0 +1,18 @@
+# Hard limits for every change this server can make. Read once at startup.
+# Changing anything here requires a redeploy, so limits can't be changed from chat.
+allowed_user_emails: [ardhofortana@gmail.com]
+allowed_customer_ids: ["6775198830"]
+allowed_campaign_ids: ["24378039028"]
+currency: IDR
+budget_idr: {min: 300000, max: 1800000, max_change_pct_per_proposal: 50}
+cpc_ceiling_idr: {min: 50000, max: 400000}
+target_cpa_idr: {min: 1000000, max: 8000000}
+keyword_match_types: [PHRASE, EXACT]
+max_negatives_per_proposal: 50
+max_keywords_per_proposal: 20
+proposal_ttl_hours: 24
+emergency_pause:
+  cost_multiple_of_budget: 2.0
+  invalid_traffic: {window_hours: 2, min_clicks: 40, min_ctr: 0.20}
+asset_url_prefix: "https://djavaweb.com/"
+ad_text_banned: ["—", "–", "!", "OpenAI", "ChatGPT", "Claude", "Gemini", "GPT"]
