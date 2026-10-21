@@ -35,7 +35,8 @@ gcloud config set project "$PROJECT_ID" >/dev/null
 
 echo "==> Enabling APIs"
 gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com \
-  secretmanager.googleapis.com firestore.googleapis.com googleads.googleapis.com
+  secretmanager.googleapis.com firestore.googleapis.com googleads.googleapis.com \
+  cloudresourcemanager.googleapis.com
 
 echo "==> Checking secrets"
 SECRETS=("$CLIENT_SECRET_NAME" "$JWT_SECRET_NAME")
