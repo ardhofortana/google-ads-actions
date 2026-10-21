@@ -18,6 +18,7 @@ class Store(Protocol):
     async def claim(self, change_id: str, from_status: str, to_status: str) -> bool: ...
     async def by_status(self, status: str) -> list[dict]: ...
     async def executed_since(self, since: dt.datetime) -> list[dict]: ...
+    async def failed_since(self, since: dt.datetime) -> list[dict]: ...
 
 
 def _check_no_nested_arrays(value, path="doc"):
@@ -68,6 +69,9 @@ class MemoryStore:
             if d.get("executed_at") and d["executed_at"] >= since
         ]
 
+    async def failed_since(self, since):
+        return [copy.deepcopy(d) for d in self.docs.values() if d.get("failed_at") and d["failed_at"] >= since]
+
 
 class FirestoreStore:
     def __init__(self, project: str | None = None, database: str | None = None):
@@ -114,4 +118,8 @@ class FirestoreStore:
 
     async def executed_since(self, since):
         q = self._col.where(filter=self._fs.FieldFilter("executed_at", ">=", since))
+        return [s.to_dict() async for s in q.stream()]
+
+    async def failed_since(self, since):
+        q = self._col.where(filter=self._fs.FieldFilter("failed_at", ">=", since))
         return [s.to_dict() async for s in q.stream()]

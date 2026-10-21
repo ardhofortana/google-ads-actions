@@ -146,9 +146,13 @@ def build_server(engine: Engine, auth=None, make_gateway=None) -> FastMCP:
         return await run(engine.cancel, customer_id, change_id)
 
     @mcp.tool(annotations=dry)
-    async def get_change_log(customer_id: CustomerId, days: int = 30) -> list[dict]:
+    async def get_change_log(
+        customer_id: CustomerId,
+        days: int = 30,
+        include_failed: Annotated[bool, Field(description="Also list refused or failed executions (drift, guardrail re-check, Google errors) with the reason and live values.")] = False,
+    ) -> list[dict]:
         """Executed changes (including emergency pauses) in the last N days, with before/after values."""
-        return await run(engine.change_log, customer_id, days)
+        return await run(engine.change_log, customer_id, days, include_failed)
 
     @mcp.tool(annotations=dry)
     async def propose_undo(customer_id: CustomerId, change_id: ChangeId) -> dict:

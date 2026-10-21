@@ -355,3 +355,48 @@ async def test_1_403_through_full_http_app(env):
     assert await status(None) == 401
     assert await status("other") == 403
     assert await status("ardho") == 200
+
+
+# Follow-ups from the live handover report ----------------------------------
+
+
+async def test_A_mixed_valid_and_blocked_negatives_still_proposes_valid_one(env):
+    r = await propose(env, "add_campaign_negatives", campaign_id=CAMPAIGN, keywords=["new harmless term", "ai integration"], match_type="PHRASE")
+    assert r["status"] == "proposed"
+    assert '"new harmless term"' in r["before_after"] and '"ai integration"' not in r["before_after"]
+    assert any("ai integration services" in w for w in r["warnings"])
+
+
+async def test_B_same_text_other_match_type_counts_as_drift(env):
+    engine, session, fake, _ = env
+    r = await propose(env, "add_campaign_negatives", campaign_id=CAMPAIGN, keywords=["drift check one", "drift check two"], match_type="PHRASE")
+    fake.state["negatives"]["555"] = {"text": "drift check one", "match_type": "BROAD"}  # added by hand, different match type
+    with pytest.raises(Refused, match="no longer match"):
+        await engine.execute(session, CUSTOMER, r["change_id"])
+    assert not any(n["text"] == "drift check two" for n in fake.state["negatives"].values())
+
+
+async def test_B_same_text_other_match_type_warns_at_propose(env):
+    env[2].state["negatives"]["556"] = {"text": "cheap ai", "match_type": "BROAD"}
+    r = await propose(env, "add_campaign_negatives", campaign_id=CAMPAIGN, keywords=["cheap ai"], match_type="PHRASE")
+    assert any("already exists as a BROAD negative" in w for w in r["warnings"])
+
+
+async def test_C_refused_execution_is_logged_with_reason_and_live_values(env):
+    engine, session, fake, clock = env
+    r = await propose(env, "set_daily_budget", campaign_id=CAMPAIGN, amount_idr=1_000_000)
+    fake.state["campaign"]["budget_amount_micros"] = 950_000 * 1_000_000
+    clock.now += dt.timedelta(minutes=1)
+    with pytest.raises(Refused, match="no longer match"):
+        await engine.execute(session, CUSTOMER, r["change_id"])
+
+    doc = await engine.get_change(session, CUSTOMER, r["change_id"])
+    assert doc["status"] == "failed" and doc["failure_kind"] == "drift"
+    assert doc["live_before"]["amount_micros"] == 950_000 * 1_000_000
+    assert doc["failed_at"].endswith("Z") and doc["failed_by"] == ARDHO
+
+    assert await engine.change_log(session, CUSTOMER) == []
+    (entry,) = await engine.change_log(session, CUSTOMER, include_failed=True)
+    assert entry["change_id"] == r["change_id"] and entry["failure_kind"] == "drift"
+    assert entry["live_before"]["amount_micros"] == 950_000 * 1_000_000
+    assert (await engine.list_pending(session, CUSTOMER)) == []

@@ -166,33 +166,45 @@ class Engine:
         if not await self.store.claim(cid, "proposed", "executing"):
             raise Refused(f"Change {cid} is no longer pending.")
 
-        async def fail(message: str):
-            await self.store.update(cid, {"status": "failed", "error": message, "failed_at": self.clock()})
+        async def fail(message: str, kind: str, **extra):
+            # Refused executions stay in the log with a reason code and, for drift,
+            # the live values found at execute time.
+            await self.store.update(
+                cid, {"status": "failed", "error": message, "failure_kind": kind, "failed_at": self.clock(), "failed_by": session.email, **extra}
+            )
             raise Refused(message)
 
         ct = planners.TYPES[doc["type"]]
         try:
             plan: Plan = await asyncio.to_thread(ct.plan, ctx, doc["request"])
         except Refused as e:
-            await fail(f"Refused on re-check, nothing changed: {e} Make a new proposal if still wanted.")
+            await fail(f"Refused on re-check, nothing changed: {e} Make a new proposal if still wanted.", "recheck_refused")
         except Exception as e:
-            await fail(f"Could not re-read the account, nothing changed: {e}")
+            await fail(f"Could not re-read the account, nothing changed: {e}", "read_error")
         if _canon(plan.before) != _canon(doc["before"]):
             await fail(
                 "Refused, nothing changed: the live values no longer match the 'before' snapshot "
                 "(the account was changed since the proposal). Make a new proposal.\n"
-                f"Now:\n{table(plan.rows)}"
+                f"Now:\n{table(plan.rows)}",
+                "drift",
+                live_before=plan.before,
+                live_rows=plan.rows,
             )
         if _canon(plan.operations) != _canon(doc["operations"]):
-            await fail("Refused, nothing changed: the change would now be different from what was proposed. Make a new proposal.")
+            await fail(
+                "Refused, nothing changed: the change would now be different from what was proposed. Make a new proposal.",
+                "plan_changed",
+                live_before=plan.before,
+                live_rows=plan.rows,
+            )
 
         try:
             result = await asyncio.to_thread(ctx.gw.mutate, doc["operations"], False)
         except AdsApiError as e:
             await self.store.update(cid, {"google_request_ids": doc["google_request_ids"] + ([e.request_id] if e.request_id else [])})
-            await fail(str(e))
+            await fail(str(e), "google_error")
         except Exception as e:
-            await fail(f"The mutate call failed ({e}); the outcome is unknown, check the account before retrying.")
+            await fail(f"The mutate call failed ({e}); the outcome is unknown, check the account before retrying.", "unknown_outcome")
 
         try:
             after = await asyncio.to_thread(ct.after, ctx, doc["request"], result)
@@ -248,7 +260,7 @@ class Engine:
         await self.store.update(doc["change_id"], {"cancelled_at": self.clock(), "cancelled_by": session.email})
         return {"change_id": doc["change_id"], "status": "cancelled"}
 
-    async def change_log(self, session: Session, customer_id, days: int = 30) -> list[dict]:
+    async def change_log(self, session: Session, customer_id, days: int = 30, include_failed: bool = False) -> list[dict]:
         ctx = self._ctx(session, customer_id)
         if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= 3650:
             raise Refused("days must be a whole number from 1 to 3650.")
@@ -257,7 +269,12 @@ class Engine:
             d for d in await self.store.executed_since(since)
             if d["status"] in EXECUTED and d["customer_id"] == ctx.gw.customer_id
         ]
-        docs.sort(key=lambda d: d["executed_at"], reverse=True)
+        if include_failed:
+            docs += [
+                d for d in await self.store.failed_since(since)
+                if d["status"] == "failed" and d["customer_id"] == ctx.gw.customer_id
+            ]
+        docs.sort(key=lambda d: d.get("executed_at") or d.get("failed_at"), reverse=True)
         return [
             _iso(
                 {
@@ -265,14 +282,19 @@ class Engine:
                     "type": d["type"],
                     "status": d["status"],
                     "summary": d["summary"],
-                    "executed_at": d["executed_at"],
-                    "user_email": d.get("executed_by") or d.get("user_email"),
+                    "executed_at": d.get("executed_at"),
+                    "user_email": d.get("executed_by") or d.get("failed_by") or d.get("user_email"),
                     "before_after": table(d["rows"]),
                     "before": d["before"],
                     "after": d["after"],
                     **({"undo_of": d["undo_of"]} if d.get("undo_of") else {}),
                     **({"undone_by": d["undone_by"]} if d.get("undone_by") else {}),
                     **({"reason": d["reason"], "evidence": d["evidence"]} if d.get("reason") else {}),
+                    **(
+                        {"failed_at": d["failed_at"], "failure_kind": d.get("failure_kind"), "error": d["error"], "live_before": d.get("live_before")}
+                        if d["status"] == "failed"
+                        else {}
+                    ),
                 }
             )
             for d in docs
@@ -361,7 +383,10 @@ class Engine:
         try:
             result = await asyncio.to_thread(ctx.gw.mutate, plan.operations, False)
         except AdsApiError as e:
-            await self.store.update(cid, {"status": "failed", "error": str(e), "google_request_ids": [e.request_id] if e.request_id else []})
+            await self.store.update(
+                cid,
+                {"status": "failed", "error": str(e), "failure_kind": "google_error", "failed_at": self.clock(), "failed_by": session.email, "google_request_ids": [e.request_id] if e.request_id else []},
+            )
             raise
         after = await asyncio.to_thread(planners.after_set_campaign_status, ctx, request, result)
         await self.store.update(

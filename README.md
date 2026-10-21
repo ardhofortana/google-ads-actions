@@ -79,6 +79,17 @@ from brief section 7: `change_id`, `type`, `status`, `request`, `before`,
 `summary`, `rows` (the before → after table), `warnings`, `skipped`,
 `undo_of`/`undone_by`, and `reason`/`evidence` for emergency pauses.
 
+An execution that is refused or fails keeps status `failed` and records
+`failure_kind` (`drift`, `plan_changed`, `recheck_refused`, `read_error`,
+`google_error` or `unknown_outcome`), `failed_at`, `failed_by`, and for drift the
+live values found at execute time (`live_before`, `live_rows`). `get_change` shows
+all of it, and `get_change_log(include_failed=true)` lists these entries alongside
+executed changes.
+
+For negative keywords, the "before" snapshot includes every existing negative
+with the same text in any match type. So a negative added by hand in between,
+even as BROAD, counts as drift.
+
 Status `executing` is used briefly while a change is running. It is claimed in a
 Firestore transaction so two instances can't run the same proposal. Queries use
 single-field filters only, so no composite index is needed.

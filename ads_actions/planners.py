@@ -164,16 +164,23 @@ def _negative_items(ctx: Ctx, req: dict) -> list[dict]:
 def plan_add_campaign_negatives(ctx: Ctx, req: dict) -> Plan:
     camp = _campaign(ctx, req.get("campaign_id"))
     items = _negative_items(ctx, req)
-    existing = {(n["text"].lower(), n["match_type"]): n for n in ctx.gw.campaign_negatives(camp["id"])}
+    all_negatives = ctx.gw.campaign_negatives(camp["id"])
+    existing = {(n["text"].lower(), n["match_type"]): n for n in all_negatives}
+    # Every existing negative with a requested text, in any match type, goes into
+    # the "before" snapshot, so adding one by hand in between counts as drift.
+    requested = {it["text"] for it in items}
+    same_text = sorted(
+        ({"text": n["text"].lower(), "match_type": n["match_type"]} for n in all_negatives if n["text"].lower() in requested),
+        key=lambda d: (d["text"], d["match_type"]),
+    )
     keywords = ctx.gw.campaign_keywords(camp["id"])
     active = [k for k in keywords if k["status"] == "ENABLED" and k["ad_group_status"] == "ENABLED"]
     dormant = [k for k in keywords if k["status"] == "ENABLED" and k["ad_group_status"] != "ENABLED"]
 
-    to_add, present, warnings, skipped = [], [], [], []
+    to_add, warnings, skipped = [], [], []
     for it in items:
         label = f'"{it["text"]}" ({it["match_type"]})'
         if (it["text"], it["match_type"]) in existing:
-            present.append(dict(it))
             skipped.append(f"{label} already exists")
             continue
         blocked = [k for k in active if negative_blocks(it["text"], it["match_type"], k["text"])]
@@ -181,6 +188,9 @@ def plan_add_campaign_negatives(ctx: Ctx, req: dict) -> Plan:
             names = ", ".join(f'"{k["text"]}" in {k["ad_group_name"]}' for k in blocked)
             warnings.append(f"Rejected {label}: it would block active keyword(s) {names}.")
             continue
+        others = [n["match_type"] for n in same_text if n["text"] == it["text"] and n["match_type"] != it["match_type"]]
+        if others:
+            warnings.append(f'{label}: the same text already exists as a {"/".join(others)} negative.')
         sleeping = [k for k in dormant if negative_blocks(it["text"], it["match_type"], k["text"])]
         if sleeping:
             names = ", ".join(f'"{k["text"]}" in {k["ad_group_name"]} (paused ad group)' for k in sleeping)
@@ -200,7 +210,7 @@ def plan_add_campaign_negatives(ctx: Ctx, req: dict) -> Plan:
     rows = [{"item": f'Negative "{it["text"]}" ({it["match_type"]})', "before": "not present", "after": "added"} for it in to_add]
     return Plan(
         summary=f"Add {len(to_add)} negative keyword(s) to campaign {camp['name']}",
-        before={"campaign_id": camp["id"], "already_present": present, "to_add": to_add},
+        before={"campaign_id": camp["id"], "existing_same_text": same_text, "to_add": to_add},
         operations=operations,
         rows=rows,
         warnings=warnings,
