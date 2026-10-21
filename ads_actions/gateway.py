@@ -157,17 +157,14 @@ class GoogleAdsGateway:
     """Calls the Google Ads API as the signed-in user."""
 
     def __init__(self, customer_id: str, access_token: str):
-        dev_token = os.environ.get("GOOGLE_ADS_DEVELOPER_TOKEN")
-        if not dev_token:
-            raise Refused("Server misconfigured: GOOGLE_ADS_DEVELOPER_TOKEN is not set.")
         self.customer_id = customer_id
         self.recorder = _RequestIdRecorder()
-        self._client = GoogleAdsClient(
-            credentials=Credentials(token=access_token),
-            developer_token=dev_token,
-            use_proto_plus=True,
-            version=API_VERSION,
-        )
+        args = {"credentials": Credentials(token=access_token), "use_proto_plus": True, "version": API_VERSION}
+        # Optional, as in googleads/google-ads-mcp: API access can come from the
+        # Cloud project instead of a developer token.
+        if os.environ.get("GOOGLE_ADS_DEVELOPER_TOKEN"):
+            args["developer_token"] = os.environ["GOOGLE_ADS_DEVELOPER_TOKEN"]
+        self._client = GoogleAdsClient(**args)
         self._ga = self._client.get_service("GoogleAdsService", interceptors=[self.recorder])
 
     # -- reads ---------------------------------------------------------------

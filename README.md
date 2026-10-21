@@ -108,15 +108,18 @@ The script needs a committed tree and `gcloud` signed in as an owner or editor o
 
 - enables the APIs;
 - creates `gads-actions-jwt-key` if it's missing;
+- builds the image with Cloud Build, tagged with the commit;
 - grants the default compute service account `secretmanager.secretAccessor` on
-  the three secrets and `datastore.user` on the project, retrying on
+  the secrets and `datastore.user` on the project, retrying on
   "concurrent policy changes";
 - deploys with `--allow-unauthenticated` plus the OAuth settings, min 0 / max 2
   instances, and a `commit-sha` label;
 - smoke-tests that `/mcp` answers 401 without a token.
 
-The developer token secret defaults to `gads-developer-token`. If
-`deploy-google-ads-mcp.sh` uses a different name, set `DEV_TOKEN_SECRET_NAME`.
+No developer token is passed by default. Like the read-only service, API access
+comes from the Cloud project. To pass one, set `DEV_TOKEN_SECRET_NAME` to a Secret
+Manager secret. The image is built to
+`us-central1-docker.pkg.dev/djavaweb-ads-mcp/mcp-servers/google-ads-actions:<commit>`.
 
 After the first deploy:
 
