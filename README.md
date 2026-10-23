@@ -70,6 +70,40 @@ clicks in the last 2 hours with 0 conversions and CTR above 20%.
 | `propose_add_campaign_assets`, `propose_remove_campaign_asset` | Sitelinks (text ≤25, descriptions ≤35, URL must start `https://djavaweb.com/`), callouts ≤25, structured snippets (Google's header list, 3 to 10 values ≤25). Max 10 per proposal. |
 | `emergency_pause_campaign(campaign_id, reason)` | Logs the reason and the live numbers |
 
+## Staying connected (OAuth)
+
+claude.ai connects through FastMCP's OAuth proxy in front of Google. Two
+additions in `ads_actions/oauth_hardening.py` keep the connector signed in:
+
+- **Refresh tokens survive rotation.** FastMCP makes each refresh token
+  single-use. When claude.ai holds the same token in two sessions (a chat and a
+  scheduled task), the first refresh used to log the other session out with
+  `invalid_grant`. A rotated-out refresh token now stays valid for
+  `OAUTH_REFRESH_REUSE_SECONDS` (default 30 days, never past its own expiry).
+  Each use still returns a new token pair, and revoking a token still ends it.
+- **Longer access tokens.** The token claude.ai receives lasts
+  `OAUTH_ACCESS_TOKEN_SECONDS` (default 8 hours) instead of Google's 1 hour.
+  The server renews the Google token by itself when it has expired.
+
+OAuth state is kept in Firestore under collections prefixed `gads-actions__`, so
+it never mixes with the read-only `google-ads-mcp` service in the same database.
+The JWT signing key (`gads-actions-jwt-key`) is a stable secret, so restarts and
+new revisions keep existing logins.
+
+The read-only service gets the same two additions without changing its code:
+`scripts/deploy-google-ads-mcp-auth-patch.sh` builds a thin image on top of its
+current image (`readonly-patch/`) that loads the module at startup. The script
+prints the rollback command.
+
+`scripts/collect-auth-evidence.sh` pulls the relevant Cloud Run logs and
+Firestore collection names for both services, without printing tokens or
+secrets. The key log line is FastMCP's `Refresh token not found ... already
+rotated`, which marks a session that was logged out by another one.
+
+Google expires refresh tokens after 7 days while the OAuth consent screen is in
+**Testing**. Publish it once: Google Auth Platform → Audience → Publish app
+(https://console.cloud.google.com/auth/audience?project=djavaweb-ads-mcp).
+
 ## Audit log
 
 Firestore collection `ads_actions`, one document per proposal, with the fields

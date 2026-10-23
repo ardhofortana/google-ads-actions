@@ -14,6 +14,9 @@ from mcp.server.subscriptions import InMemorySubscriptionBus, ListenHandler
 from pydantic import Field
 from starlette.middleware import Middleware
 
+from key_value.aio.wrappers.prefix_collections import PrefixCollectionsWrapper
+
+from ads_actions import oauth_hardening
 from ads_actions.engine import Engine, Session
 from ads_actions.errors import Forbidden, Refused
 from ads_actions.gateway import GoogleAdsGateway
@@ -26,6 +29,8 @@ SCOPES = [
     "https://www.googleapis.com/auth/userinfo.profile",
     "https://www.googleapis.com/auth/adwords",
 ]
+
+OAUTH_COLLECTION_PREFIX = "gads-actions"
 
 INSTRUCTIONS = """Write tools for one Google Ads account, with a two-step rule.
 Every change is made with a propose_* tool first. It validates the change with
@@ -95,7 +100,10 @@ def build_auth() -> GoogleProvider:
         kwargs["jwt_signing_key"] = os.environ["GOOGLE_ADS_MCP_JWT_SIGNING_KEY"]
     storage = create_client_storage()
     if storage is not None:
-        kwargs["client_storage"] = storage
+        # Own collections, so this service never shares OAuth state with the
+        # read-only google-ads-mcp service in the same Firestore database.
+        kwargs["client_storage"] = PrefixCollectionsWrapper(key_value=storage, prefix=OAUTH_COLLECTION_PREFIX)
+    oauth_hardening.install()
     return GoogleProvider(**kwargs)
 
 
