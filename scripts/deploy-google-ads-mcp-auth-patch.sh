@@ -12,7 +12,7 @@ PROJECT_ID="djavaweb-ads-mcp"
 REGION="us-central1"
 SERVICE="google-ads-mcp"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-COMMIT_SHA="$(git -C "$ROOT" rev-parse --short=12 HEAD)"
+COMMIT_SHA="${COMMIT_SHA:-$(git -C "$ROOT" rev-parse --short=12 HEAD)}"  # override when deploying from an exported copy
 gcloud config set project "$PROJECT_ID" >/dev/null
 
 CURRENT_IMAGE="$(gcloud run services describe "$SERVICE" --region "$REGION" --format='value(spec.template.spec.containers[0].image)')"

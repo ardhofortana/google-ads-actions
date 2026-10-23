@@ -28,7 +28,7 @@ if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
   echo "Refusing to deploy: uncommitted changes. Commit first so the deployed image maps to a commit." >&2
   exit 1
 fi
-COMMIT_SHA="$(git rev-parse --short=12 HEAD)"
+COMMIT_SHA="${COMMIT_SHA:-$(git rev-parse --short=12 HEAD)}"  # override when deploying from an exported copy
 IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/${SERVICE}:${COMMIT_SHA}"
 
 gcloud config set project "$PROJECT_ID" >/dev/null
