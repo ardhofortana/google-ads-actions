@@ -4,7 +4,7 @@
 **Spec:** `google-ads-connectors-auth-fix-brief.md`
 **Services:** `google-ads-mcp` (read-only) and `google-ads-actions` (write), project `djavaweb-ads-mcp`, `us-central1`
 **Code:** `ardhofortana/google-ads-actions`, commit noted at the bottom
-**Status:** cause confirmed from Cloud Run logs; fix built and tested offline; **deploy and acceptance tests pending**
+**Status:** cause confirmed from Cloud Run logs; fix **deployed** to both services on 23 Oct; **acceptance tests pending**
 
 ## Summary
 
@@ -51,11 +51,19 @@ Unchanged: tools, guardrails, user allowlist, audit log, OAuth client and client
 
 Offline tests (51, all passing) include the failure itself, reproduced against FastMCP's real `GoogleProvider`. Without the fix, a second refresh with the same token fails with the same `Refresh token not found` warning as in production. With the fix, both sessions keep working, and a revoked token stays revoked.
 
+## Deployed (23 Oct, by Ardho from Cloud Shell)
+
+| Service | Revision | Image | Timeout | Min instances | CPU boost |
+|---|---|---|---|---|---|
+| `google-ads-mcp` | `google-ads-mcp-00003-hw5` | `google-ads-mcp:authfix-93e9d2b62425` (original image + `oauth_hardening`) | 3600 s | 1 | on |
+| `google-ads-actions` | `google-ads-actions-00005-kk9` | `google-ads-actions:25f047797735` | 3600 s | 1 | on |
+
+`MIN_INSTANCES=1` was chosen, so neither service cold-starts any more. Both images contain the same `oauth_hardening.py`: it is unchanged between commits `93e9d2b62425` and `25f047797735`, which differ only in deploy scripts and this report. The Actions image was built from the `93e9d2b62425` scripts (an older package was extracted in Cloud Shell), so its server code is identical. Timeout and min instances were then set with `gcloud run services update`.
+
 ## Actions for Ardho
 
-1. Run the two deploy scripts (commands in the chat).
-2. Reconnect **Google Ads Actions** once.
-3. Consent screen: https://console.cloud.google.com/auth/audience?project=djavaweb-ads-mcp. If the status is **Testing**, click **Publish app**.
+1. Reconnect **Google Ads Actions** once (its OAuth storage moved). The read-only connector needs no reconnect.
+2. Consent screen: https://console.cloud.google.com/auth/audience?project=djavaweb-ads-mcp. If the status is **Testing**, click **Publish app**.
 
 ## Acceptance tests
 
@@ -71,6 +79,6 @@ Offline tests (51, all passing) include the failure itself, reproduced against F
 ## Remaining risk
 
 - With a 3600 s timeout, a long-lived MCP stream is still cut once an hour. Test 1 (2 h idle) shows whether claude.ai reconnects on its own. If it doesn't, the next step is FastMCP's stateless HTTP mode (`FASTMCP_STATELESS_HTTP=true`), which has no long-lived stream.
-- Without `MIN_INSTANCES=1`, cold starts remain (shorter with CPU boost). The reuse window makes a slow refresh harmless, but a slow first call can still time out on claude.ai's side.
+- One warm instance per service has a small standing cost (Cloud Run idle-instance pricing). Setting `--min-instances 0` brings back cold starts, now shorter with CPU boost.
 
 **Commit:** see `git log` (`claude/google-ads-connectors-auth-fix-report.md` is updated with results after the acceptance tests).
