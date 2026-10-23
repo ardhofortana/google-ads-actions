@@ -30,7 +30,7 @@ for e in c.get("env", []):
   section "$SVC: revisions"
   gcloud run revisions list --service "$SVC" --region "$REGION" --format='table(metadata.name,metadata.creationTimestamp)' | head -15
 
-  section "$SVC: OAuth and /mcp requests $START .. $END (non-2xx /mcp, all OAuth endpoints)"
+  section "$SVC: OAuth and /mcp requests $START .. $END (OAuth endpoints; /mcp if non-2xx or >= 30 s)"
   gcloud logging read "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"$SVC\" AND logName=\"projects/$PROJECT_ID/logs/run.googleapis.com%2Frequests\" AND timestamp>=\"$START\" AND timestamp<=\"$END\"" \
     --order=asc --limit=2000 --format=json | python3 -c '
 import json, sys
@@ -38,7 +38,8 @@ from urllib.parse import urlsplit
 for e in json.load(sys.stdin):
     r = e.get("httpRequest", {}); path = urlsplit(r.get("requestUrl", "")).path; st = r.get("status", 0)
     oauth = any(path.startswith(p) for p in ("/token", "/authorize", "/auth/callback", "/register", "/revoke", "/.well-known", "/consent"))
-    if oauth or (path.startswith("/mcp") and not 200 <= st < 300):
+    lat = float(str(r.get("latency", "0s")).rstrip("s") or 0)
+    if oauth or (path.startswith("/mcp") and (not 200 <= st < 300 or lat >= 30)):
         print(e["timestamp"][:23], st, r.get("requestMethod", ""), path, r.get("latency", ""), "inst=" + e.get("labels", {}).get("instanceId", "")[-8:])'
 
   section "$SVC: auth log lines $START .. $END"

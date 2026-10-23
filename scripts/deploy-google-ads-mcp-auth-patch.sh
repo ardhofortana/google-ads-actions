@@ -2,6 +2,7 @@
 # Rebuilds the read-only google-ads-mcp service on its CURRENT image with the
 # refresh-token reuse window added, and deploys it. Env vars, secrets, OAuth
 # client and Firestore collections are untouched, so existing logins stay valid.
+# Also raises the request timeout to 60 min and turns on startup CPU boost.
 #
 # Rollback: gcloud run services update-traffic google-ads-mcp --region us-central1 \
 #             --to-revisions <previous revision>=100
@@ -43,5 +44,8 @@ while true; do
 done
 
 echo "==> Deploying $SERVICE (previous revision: $PREVIOUS_REVISION)"
-gcloud run deploy "$SERVICE" --image "$NEW_IMAGE" --region "$REGION" --update-labels "authfix-commit=${COMMIT_SHA}"
+# --timeout 3600: Cloud Run's default 300 s cut claude.ai's MCP stream every
+# 5 minutes. --cpu-boost shortens cold starts. MIN_INSTANCES=1 removes them.
+gcloud run deploy "$SERVICE" --image "$NEW_IMAGE" --region "$REGION" --update-labels "authfix-commit=${COMMIT_SHA}" \
+  --timeout 3600 --cpu-boost --min-instances "${MIN_INSTANCES:-0}"
 echo "Done. Rollback: gcloud run services update-traffic $SERVICE --region $REGION --to-revisions ${PREVIOUS_REVISION}=100"
