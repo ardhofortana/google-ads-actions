@@ -265,7 +265,7 @@ def build_server(engine: Engine, auth=None, make_gateway=None) -> FastMCP:
         descriptions: Annotated[list[str] | None, Field(description="2 to 4 descriptions, max 90 characters each. Replaces all descriptions.")] = None,
         pin_first_headline: Annotated[bool | None, Field(description="True pins the first headline to position 1; False removes that pin; None keeps existing pins.")] = None,
     ) -> dict:
-        """Proposes new copy for an existing responsive search ad. Final URL and paths never change. No dashes, exclamation marks, AI-provider names or prices."""
+        """Proposes new copy for an existing responsive search ad. Final URL and paths never change. New or changed lines may not contain dashes, exclamation marks, AI-provider names or prices; lines identical to the live ad are kept as they are."""
         return await propose("update_rsa", customer_id, {"ad_id": ad_id, "headlines": headlines, "descriptions": descriptions, "pin_first_headline": pin_first_headline})
 
     @mcp.tool(annotations=dry)

@@ -45,7 +45,7 @@ done
 
 echo "==> Deploying $SERVICE (previous revision: $PREVIOUS_REVISION)"
 # --timeout 3600: Cloud Run's default 300 s cut claude.ai's MCP stream every
-# 5 minutes. --cpu-boost shortens cold starts. MIN_INSTANCES=1 removes them.
+# 5 minutes. --cpu-boost shortens cold starts. MIN_INSTANCES (default 1) removes them.
 gcloud run deploy "$SERVICE" --image "$NEW_IMAGE" --region "$REGION" --update-labels "authfix-commit=${COMMIT_SHA}" \
-  --timeout 3600 --cpu-boost --min-instances "${MIN_INSTANCES:-0}"
+  --timeout 3600 --cpu-boost --min-instances "${MIN_INSTANCES:-1}"
 echo "Done. Rollback: gcloud run services update-traffic $SERVICE --region $REGION --to-revisions ${PREVIOUS_REVISION}=100"

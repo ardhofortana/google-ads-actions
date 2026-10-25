@@ -23,8 +23,9 @@ JWT_SECRET_NAME="gads-actions-jwt-key"
 DEV_TOKEN_SECRET_NAME="${DEV_TOKEN_SECRET_NAME:-}"
 RUNTIME_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
 REPOSITORY="mcp-servers"
-# MIN_INSTANCES=1 keeps one instance warm, so claude.ai never waits 20-40 s for a
-# cold start (which made it give up mid-refresh). It costs a small idle fee.
+# MIN_INSTANCES (default 1) keeps one instance warm, so claude.ai never waits
+# 20-40 s for a cold start (which made it give up mid-refresh). Small idle fee;
+# set MIN_INSTANCES=0 to turn it off.
 
 if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
   echo "Refusing to deploy: uncommitted changes. Commit first so the deployed image maps to a commit." >&2
@@ -100,7 +101,7 @@ gcloud run deploy "$SERVICE" \
   --region "$REGION" \
   --service-account "$RUNTIME_SA" \
   --allow-unauthenticated \
-  --min-instances "${MIN_INSTANCES:-0}" \
+  --min-instances "${MIN_INSTANCES:-1}" \
   --max-instances 2 \
   --timeout 3600 \
   --cpu-boost \

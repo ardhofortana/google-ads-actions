@@ -154,3 +154,16 @@ def test_gaql_fields_exist_in_v26_proto():
                     break
                 d = fd.message_type
     assert bad == []
+
+
+def test_where_fields_of_other_resources_are_selected():
+    """campaign_asset (and others) reject a WHERE on campaign.id unless it is selected."""
+    missing = []
+    for q in ALL_QUERIES:
+        select = {f.strip() for f in re.search(r"SELECT(.*?)FROM", q, re.S).group(1).split(",")}
+        main = re.search(r"FROM\s+(\w+)", q).group(1)
+        where = q.split("WHERE", 1)[1] if "WHERE" in q else ""
+        for f in re.findall(r"\b([a-z_]+(?:\.[a-z_0-9]+)+)\s*(?:=|!=)", where):
+            if not f.startswith(main + ".") and not f.startswith("segments.") and f not in select:
+                missing.append((main, f))
+    assert missing == []

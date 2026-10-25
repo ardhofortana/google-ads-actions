@@ -66,7 +66,7 @@ clicks in the last 2 hours with 0 conversions and CTR above 20%.
 | `propose_set_daily_budget` | Rp300.000 to Rp1.800.000, at most ±50% per proposal, refused if the budget is shared |
 | `propose_set_bidding` | Maximize clicks (CPC ceiling Rp50.000 to Rp400.000) or Maximize conversions (target CPA Rp1.000.000 to Rp8.000.000). Refused on portfolio strategies. |
 | `propose_set_ad_schedule`, `propose_shift_ad_schedule` | Whole hours, account time zone (WIB). Shift merges the hour that spills past midnight into the next day's early slot. Bid modifiers are kept. |
-| `propose_update_rsa` | Headlines 3 to 15 (≤30 chars), descriptions 2 to 4 (≤90). No em or en dashes, no `!`, no OpenAI/ChatGPT/Claude/Gemini/GPT, no prices. Final URL and paths are never in the update mask. Plain-string headlines keep the existing pin of a headline with the same text. |
+| `propose_update_rsa` | Headlines 3 to 15 (≤30 chars), descriptions 2 to 4 (≤90). New or changed lines: no em or en dashes, no `!`, no OpenAI/ChatGPT/Claude/Gemini/GPT, no prices. A line whose trimmed text exactly matches a live line of the same type is kept as is and shown as `(unchanged, existing)`, so a price a person added in the UI doesn't lock the ad. Final URL and paths are never in the update mask. Plain-string headlines keep the existing pin of a headline with the same text. |
 | `propose_add_campaign_assets`, `propose_remove_campaign_asset` | Sitelinks (text ≤25, descriptions ≤35, URL must start `https://djavaweb.com/`), callouts ≤25, structured snippets (Google's header list, 3 to 10 values ≤25). Max 10 per proposal. |
 | `emergency_pause_campaign(campaign_id, reason)` | Logs the reason and the live numbers |
 

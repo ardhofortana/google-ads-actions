@@ -41,7 +41,9 @@ class Gateway(Protocol):
 
 
 # GAQL used by GoogleAdsGateway. Kept at module level so tests can check every
-# selected field against the GoogleAdsRow proto.
+# selected field against the GoogleAdsRow proto. A field of another resource
+# used in WHERE (e.g. campaign.id) must also be selected: campaign_asset rejects
+# the query otherwise (EXPECTED_REFERENCED_FIELD_IN_SELECT_CLAUSE).
 Q_CAMPAIGN = """
 SELECT campaign.id, campaign.name, campaign.status, campaign.campaign_budget,
   campaign.bidding_strategy_type, campaign.bidding_strategy,
@@ -52,14 +54,14 @@ SELECT campaign.id, campaign.name, campaign.status, campaign.campaign_budget,
 FROM campaign WHERE campaign.id = {campaign_id}"""
 
 Q_NEGATIVES = """
-SELECT campaign_criterion.criterion_id, campaign_criterion.keyword.text,
+SELECT campaign.id, campaign_criterion.criterion_id, campaign_criterion.keyword.text,
   campaign_criterion.keyword.match_type
 FROM campaign_criterion
 WHERE campaign.id = {campaign_id} AND campaign_criterion.type = KEYWORD
   AND campaign_criterion.negative = TRUE AND campaign_criterion.status != REMOVED"""
 
 Q_KEYWORDS = """
-SELECT ad_group.id, ad_group.name, ad_group.status,
+SELECT campaign.id, ad_group.id, ad_group.name, ad_group.status,
   ad_group_criterion.criterion_id, ad_group_criterion.keyword.text,
   ad_group_criterion.keyword.match_type, ad_group_criterion.status
 FROM ad_group_criterion
@@ -72,7 +74,7 @@ SELECT ad_group.id, ad_group.name, ad_group.status, campaign.id
 FROM ad_group WHERE ad_group.id = {ad_group_id}"""
 
 Q_SCHEDULE = """
-SELECT campaign_criterion.criterion_id, campaign_criterion.ad_schedule.day_of_week,
+SELECT campaign.id, campaign_criterion.criterion_id, campaign_criterion.ad_schedule.day_of_week,
   campaign_criterion.ad_schedule.start_hour, campaign_criterion.ad_schedule.start_minute,
   campaign_criterion.ad_schedule.end_hour, campaign_criterion.ad_schedule.end_minute,
   campaign_criterion.bid_modifier
@@ -89,7 +91,7 @@ SELECT ad_group_ad.ad.id, ad_group_ad.ad.type, ad_group_ad.status,
 FROM ad_group_ad WHERE ad_group_ad.ad.id = {ad_id} AND ad_group_ad.status != REMOVED"""
 
 Q_ASSETS = """
-SELECT campaign_asset.resource_name, campaign_asset.field_type, campaign_asset.status,
+SELECT campaign.id, campaign_asset.resource_name, campaign_asset.field_type, campaign_asset.status,
   asset.id, asset.type, asset.final_urls, asset.sitelink_asset.link_text,
   asset.sitelink_asset.description1, asset.sitelink_asset.description2,
   asset.callout_asset.callout_text, asset.structured_snippet_asset.header,

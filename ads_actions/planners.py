@@ -668,20 +668,33 @@ def _text_assets(raw, existing: list[dict], kind: str) -> list[dict]:
     return out
 
 
-def _check_assets(ctx, assets: list[dict], kind: str) -> list[dict]:
+def _check_assets(ctx, assets: list[dict], kind: str, live: list[dict]) -> tuple[list[dict], set[str]]:
+    """Validates the full list. Returns it plus the texts kept from the live ad.
+
+    The copy rules (length, dashes, "!", AI names, prices) apply only to lines
+    that are new or changed. A line whose trimmed text exactly matches a live
+    line of the same type is kept as it is, so a price a person put in the ad
+    doesn't lock it. Count, uniqueness and pin checks still cover every line.
+    """
     is_h = kind == "headlines"
     max_len = text_rules.HEADLINE_MAX if is_h else text_rules.DESCRIPTION_MAX
     lo, hi = (text_rules.HEADLINES_MIN, text_rules.HEADLINES_MAX) if is_h else (text_rules.DESCRIPTIONS_MIN, text_rules.DESCRIPTIONS_MAX)
     text_rules.check_count(kind.title(), len(assets), lo, hi)
-    out = []
+    live_texts = {l["text"].strip(): l["text"] for l in live}
+    out, kept = [], set()
     for i, a in enumerate(assets, 1):
-        t = text_rules.check_text(f"{kind[:-1].title()} {i}", a["text"], max_len, ctx.g.ad_text_banned)
+        raw = a["text"] if isinstance(a["text"], str) else None
+        if raw is not None and raw.strip() in live_texts:
+            t = live_texts[raw.strip()]
+            kept.add(t)
+        else:
+            t = text_rules.check_text(f"{kind[:-1].title()} {i}", a["text"], max_len, ctx.g.ad_text_banned)
         pin = a.get("pinned_field")
         if pin and (pin not in PIN_FIELDS or pin.startswith("HEADLINE") != is_h):
             raise Refused(f"Invalid pin {pin} on {kind[:-1]} {i}.")
         out.append({"text": t, **({"pinned_field": pin} if pin else {})})
     text_rules.check_unique(kind.title(), [a["text"] for a in out])
-    return out
+    return out, kept
 
 
 def _asset_label(a: dict) -> str:
@@ -701,7 +714,7 @@ def plan_update_rsa(ctx: Ctx, req: dict) -> Plan:
     if h_raw is None and d_raw is None and pin_first is None:
         raise Refused("Nothing to change: give headlines, descriptions or pin_first_headline.")
 
-    mask, rsa, rows = [], {}, []
+    mask, rsa, rows, kept = [], {}, [], {"headlines": set(), "descriptions": set()}
     headlines = _text_assets(h_raw, ad["headlines"], "headlines") if h_raw is not None else [dict(h) for h in ad["headlines"]]
     if pin_first is not None:
         for h in headlines:
@@ -710,12 +723,14 @@ def plan_update_rsa(ctx: Ctx, req: dict) -> Plan:
         if pin_first:
             headlines[0]["pinned_field"] = "HEADLINE_1"
     if h_raw is not None or pin_first is not None:
-        headlines = _check_assets(ctx, headlines, "headlines")
+        headlines, kept["headlines"] = _check_assets(ctx, headlines, "headlines", ad["headlines"])
         if headlines != ad["headlines"]:
             rsa["headlines"] = headlines
             mask.append("responsive_search_ad.headlines")
     if d_raw is not None:
-        descriptions = _check_assets(ctx, _text_assets(d_raw, ad["descriptions"], "descriptions"), "descriptions")
+        descriptions, kept["descriptions"] = _check_assets(
+            ctx, _text_assets(d_raw, ad["descriptions"], "descriptions"), "descriptions", ad["descriptions"]
+        )
         if descriptions != ad["descriptions"]:
             rsa["descriptions"] = descriptions
             mask.append("responsive_search_ad.descriptions")
@@ -729,7 +744,9 @@ def plan_update_rsa(ctx: Ctx, req: dict) -> Plan:
         for i in range(max(len(old), len(new))):
             b = _asset_label(old[i]) if i < len(old) else "(none)"
             a = _asset_label(new[i]) if i < len(new) else "(removed)"
-            rows.append({"item": f"{kind[:-1].title()} {i + 1}", "before": b, "after": a + ("" if a != b else " (unchanged)")})
+            if i < len(new) and new[i]["text"] in kept[kind]:
+                a += " (unchanged, existing)"
+            rows.append({"item": f"{kind[:-1].title()} {i + 1}", "before": b, "after": a})
     return Plan(
         summary=f"Update responsive search ad {ad_id} ({', '.join(k for k in ('headlines', 'descriptions') if k in rsa)}). Final URL and paths stay the same.",
         before={"headlines": ad["headlines"], "descriptions": ad["descriptions"]},
@@ -830,7 +847,7 @@ def plan_add_campaign_assets(ctx: Ctx, req: dict) -> Plan:
         temp = rn.asset(-(len(asset_ops) + 1))
         asset_ops.append(ops.create("asset", {"resource_name": temp, **body}))
         link_ops.append(ops.create("campaign_asset", {"asset": temp, "campaign": rn.campaign(camp["id"]), "field_type": field_type}))
-        rows.append({"item": _asset_desc(field_type, view), "before": "not on campaign", "after": "added"})
+        rows.append({"item": _asset_desc(field_type, view), "before": "not linked", "after": "new asset, linked"})
     if not asset_ops:
         raise Refused("Nothing to add. " + " ".join(skipped))
     return Plan(
@@ -886,7 +903,7 @@ def plan_remove_campaign_assets(ctx: Ctx, req: dict) -> Plan:
         summary=f"Remove {len(targets)} asset(s) from {camp['name']} (the assets stay in the account library)",
         before={"campaign_id": camp["id"], "links": targets},
         operations=[ops.remove("campaign_asset", rn.campaign_asset(camp["id"], a["asset_id"], a["field_type"])) for a in targets],
-        rows=[{"item": _asset_desc(a["field_type"], a) + f" #{a['asset_id']}", "before": "on campaign", "after": "removed from campaign"} for a in targets],
+        rows=[{"item": _asset_desc(a["field_type"], a) + f" #{a['asset_id']}", "before": "linked", "after": "unlinked (asset stays in the library)"} for a in targets],
     )
 
 
@@ -914,7 +931,7 @@ def plan_link_campaign_assets(ctx: Ctx, req: dict) -> Plan:
         summary=f"Re-link {len(links)} existing asset(s) to {camp['name']}",
         before={"campaign_id": camp["id"], "linked": []},
         operations=[ops.create("campaign_asset", {"asset": rn.asset(l["asset_id"]), "campaign": rn.campaign(camp["id"]), "field_type": l["field_type"]}) for l in links],
-        rows=[{"item": f"{l['field_type'].title()} asset #{l['asset_id']}", "before": "not on campaign", "after": "linked"} for l in links],
+        rows=[{"item": f"{l['field_type'].title()} asset #{l['asset_id']}", "before": "not linked", "after": "linked"} for l in links],
     )
 
 
