@@ -38,6 +38,10 @@ STRATEGY_FROM_API = {"TARGET_SPEND": "MAXIMIZE_CLICKS", "MAXIMIZE_CONVERSIONS": 
 class Ctx:
     gw: Gateway
     g: Guardrails
+    # The executed audit-log entry being undone. Set only by the engine for
+    # propose_undo and for executing an undo proposal; never from tool input.
+    # Its presence is what exempts a restore from the ±% change limits.
+    undo_of: dict | None = None
 
     @property
     def rn(self) -> ops.RN:
@@ -453,7 +457,7 @@ def plan_set_daily_budget(ctx: Ctx, req: dict) -> Plan:
     if amount == current:
         raise Refused(f"The daily budget is already Rp{current:,}.")
     pct = abs(amount - current) / current * 100 if current else float("inf")
-    if pct > ctx.g.budget_max_change_pct and not req.get("restore"):  # undo restores a live value
+    if pct > ctx.g.budget_max_change_pct and ctx.undo_of is None:  # an undo restores a value that was live before
         raise Refused(
             f"Rp{current:,} to Rp{amount:,} is a {pct:.0f}% change; the limit is "
             f"{ctx.g.budget_max_change_pct:g}% per proposal."
@@ -471,7 +475,7 @@ def after_set_daily_budget(ctx, req, result):
 
 
 def inverse_set_daily_budget(doc):
-    return "set_daily_budget", {"campaign_id": doc["request"]["campaign_id"], "amount_idr": doc["before"]["amount_micros"] // MICROS, "restore": True}
+    return "set_daily_budget", {"campaign_id": doc["request"]["campaign_id"], "amount_idr": doc["before"]["amount_micros"] // MICROS}
 
 
 # -- bidding ----------------------------------------------------------------------
@@ -501,7 +505,7 @@ def _check_bid(ctx: Ctx, label: str, new_idr: int, current_micros: int | None, r
 
 
 def _check_bid_change(ctx: Ctx, label: str, new_micros: int, current_micros: int | None, restore: bool = False) -> str:
-    """``restore`` (set only by propose_undo) skips the ±% limit, never the range:
+    """``restore`` (an undo, see Ctx.undo_of) skips the ±% limit, never the range:
     undoing a -50% change needs +100%, and the old value was live before."""
     if not current_micros:
         return "new"
@@ -529,8 +533,8 @@ def plan_set_bidding(ctx: Ctx, req: dict) -> Plan:
     ceiling, cpa = req.get("cpc_ceiling_idr"), req.get("target_cpa_idr")
     default_cpc = req.get("ad_group_default_cpc_idr")
     raw_bids = req.get("ad_group_bids") or {}
-    only_listed = bool(req.get("only_listed_ad_groups"))  # set by propose_undo only
-    restore = bool(req.get("restore"))  # set by propose_undo only
+    # An undo touches only the ad groups it lists, and may skip the ±% limit.
+    only_listed = restore = ctx.undo_of is not None
     if strategy not in STRATEGIES:
         raise Refused("strategy must be MAXIMIZE_CLICKS, MAXIMIZE_CONVERSIONS or MANUAL_CPC.")
     if camp["portfolio_bidding_strategy"]:
@@ -669,8 +673,6 @@ def inverse_set_bidding(doc):
         if g["cpc_bid_micros"] and after.get(g["ad_group_id"]) != g["cpc_bid_micros"]
     }
     req["ad_group_bids"] = changed
-    req["only_listed_ad_groups"] = True
-    req["restore"] = True
     return "set_bidding", req
 
 
@@ -681,7 +683,7 @@ def plan_set_ad_group_cpc(ctx: Ctx, req: dict) -> Plan:
     new = _int(req.get("cpc_idr"), "cpc_idr")
     if ag["cpc_bid_micros"] == new * MICROS:
         raise Refused(f"Ad group {ag['name']} is already at Rp{new:,}.")
-    change = _check_bid(ctx, f"Ad group {ag['name']}", new, ag["cpc_bid_micros"], bool(req.get("restore")))
+    change = _check_bid(ctx, f"Ad group {ag['name']}", new, ag["cpc_bid_micros"], ctx.undo_of is not None)
     return Plan(
         summary=f"Set default max CPC of ad group {ag['name']} to Rp{new:,}",
         before={"bidding_strategy_type": camp["bidding_strategy_type"], "cpc_bid_micros": ag["cpc_bid_micros"]},
@@ -697,7 +699,7 @@ def after_set_ad_group_cpc(ctx, req, result):
 def inverse_set_ad_group_cpc(doc):
     if not doc["before"]["cpc_bid_micros"]:
         raise Refused("The ad group had no default bid before; set one with propose_set_ad_group_cpc.")
-    return "set_ad_group_cpc", {"ad_group_id": doc["request"]["ad_group_id"], "cpc_idr": doc["before"]["cpc_bid_micros"] // MICROS, "restore": True}
+    return "set_ad_group_cpc", {"ad_group_id": doc["request"]["ad_group_id"], "cpc_idr": doc["before"]["cpc_bid_micros"] // MICROS}
 
 
 def plan_set_keyword_cpc(ctx: Ctx, req: dict) -> Plan:
@@ -730,7 +732,7 @@ def plan_set_keyword_cpc(ctx: Ctx, req: dict) -> Plan:
 
     operations, rows, before, skipped = [], [], [], []
     rn = ctx.rn
-    restore = bool(req.get("restore"))
+    restore = ctx.undo_of is not None
     for ag, kw, cpc in parsed:
         own, default = kw["cpc_bid_micros"], kw["ad_group_cpc_bid_micros"]
         label = f'Keyword "{kw["text"]}" ({kw["match_type"]}) in {ag["name"]}'
@@ -777,7 +779,7 @@ def inverse_set_keyword_cpc(doc):
         {"ad_group_id": k["ad_group_id"], "criterion_id": k["criterion_id"], "cpc_idr": (k["cpc_bid_micros"] // MICROS) if k["cpc_bid_micros"] else 0}
         for k in doc["before"]["keywords"]
     ]
-    return "set_keyword_cpc", {"items": items, "restore": True}
+    return "set_keyword_cpc", {"items": items}
 
 
 def _device_pct(modifier) -> int:
@@ -1204,6 +1206,44 @@ def after_link_campaign_assets(ctx, req, result):
     camp_id = ctx.g.check_campaign(_id(req["campaign_id"], "campaign_id"))
     wanted = {(l["asset_id"], l["field_type"]) for l in _parse_links(req)}
     return {"added": [a for a in ctx.gw.campaign_assets(camp_id) if (a["asset_id"], a["field_type"]) in wanted]}
+
+
+# -- undo guard ----------------------------------------------------------------------
+
+
+def _sorted_tuples(items, keys):
+    return sorted(tuple(str(i.get(k)) for k in keys) for i in items or [])
+
+
+_UNDO_VIEWS = {
+    "add_campaign_negatives": lambda doc, v: {"added": _sorted_tuples(v.get("added"), ("criterion_id", "text", "match_type"))},
+    "add_keywords": lambda doc, v: {"added": _sorted_tuples(v.get("added"), ("ad_group_id", "criterion_id", "text", "match_type"))},
+    "add_campaign_assets": lambda doc, v: {"added": _sorted_tuples(v.get("added"), ("asset_id", "field_type"))},
+    "link_campaign_assets": lambda doc, v: {"added": _sorted_tuples(v.get("added"), ("asset_id", "field_type"))},
+    "remove_campaign_negatives": lambda doc, v: {"still_present": _sorted_tuples(v.get("still_present"), ("criterion_id",))},
+    "remove_keywords": lambda doc, v: {"still_present": _sorted_tuples(v.get("still_present"), ("criterion_id",))},
+    "remove_campaign_assets": lambda doc, v: {"still_linked": _sorted_tuples(v.get("still_linked"), ("asset_id", "field_type"))},
+    "set_bidding": lambda doc, v: {
+        **{k: x for k, x in v.items() if k != "ad_groups"},
+        **(
+            {"ad_groups": {g["ad_group_id"]: g["cpc_bid_micros"] for g in v.get("ad_groups") or [] if g["ad_group_id"] in {b["ad_group_id"] for b in doc["before"]["ad_groups"]}}}
+            if "ad_groups" in v and "ad_groups" in doc["before"]
+            else {}
+        ),
+    },
+}
+
+
+def undo_view(doc: dict, after: dict) -> dict:
+    """The part of an "after" record an undo depends on, in comparable form.
+
+    Only keys present in the stored "after" are compared, so entries written by
+    older versions of this server still work.
+    """
+    ref = doc.get("after") or {}
+    view = {k: after.get(k) for k in ref if k not in ("resource_names", "read_error")}
+    project = _UNDO_VIEWS.get(doc["type"])
+    return project(doc, view) if project else view
 
 
 # -- registry ------------------------------------------------------------------------

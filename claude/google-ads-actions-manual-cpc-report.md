@@ -4,7 +4,7 @@
 **Spec:** `google-ads-actions-manual-cpc-request.md` (28 October 2026)
 **Service:** `google-ads-actions`, project `djavaweb-ads-mcp`, `us-central1`
 **Code:** `ardhofortana/google-ads-actions`, commit noted at the bottom
-**Status:** built and tested offline (85 tests); **deploy and live tests pending**. Nothing has been executed on the account.
+**Status:** built and tested offline (100 tests); **deploy and live tests pending**. Nothing has been executed on the account.
 
 ## What was added
 
@@ -30,11 +30,17 @@ Everything else is unchanged: propose → execute, drift check, user allowlist, 
 
 ## One deliberate exception: undo and the ±50% limit
 
-A ±50% limit can't undo itself: lowering a bid by 44% (Rp270.000 → Rp150.000) needs +80% to reverse. The same was already true for budgets. An **undo** is therefore exempt from the per-proposal **change** limit, for bids and budgets only. It still has to pass the **ranges** (Rp20.000 to Rp400.000 for bids), the drift check, and `execute_change` after approval. Only `propose_undo` can set this exemption; no tool accepts it, and a test checks that. A normal proposal from Rp140.000 to Rp270.000 (+93%) is still refused.
+A ±50% limit can't undo itself: lowering a bid by 44% (Rp270.000 → Rp150.000) needs +80% to reverse. The same was already true for budgets. An **undo** is therefore exempt from the per-proposal **change** limit, for bids and budgets only. **Approved by Ardho on 28 Oct**, with these safeguards, each covered by tests (`tests/test_undo_safety.py`):
+
+1. **Values only from the audit log.** `propose_undo` takes only `customer_id` and `change_id`. The undo's values are built from the "before" snapshot of that executed entry. The exemption depends on a server-side reference to that entry, never on anything in a request: flags such as `restore` or `only_listed_ad_groups` sent as input are ignored, and a normal +93% proposal is still refused. At execute, the undo request is re-derived from the audit log and must match the stored request exactly. A tampered request or a tampered "before" snapshot is refused with `failure_kind: undo_mismatch`.
+2. **Live must equal the original "after".** At propose and again at execute, the live values are read the same way the original "after" was read and compared with it. Any difference (budget, strategy or ceiling, any bid the change set, keyword bid, device modifier, removed negative) refuses the undo with `failure_kind: undo_live_changed`. Things the change didn't touch, such as a paused ad group's bid, don't block it.
+3. **Ranges still apply.** Bids Rp20.000 to Rp400.000, budget Rp300.000 to Rp1.800.000. An undo back to a value outside the range (set by hand in the UI earlier) is refused.
+
+The drift check and `execute_change` after approval apply as for any proposal.
 
 ## Tests
 
-Offline results come from the in-memory fake account, seeded with the five ad groups at Rp270.000 (`tests/test_manual_cpc.py`). Live tests are proposals only: **do not execute test 1**.
+Offline results come from the in-memory fake account, seeded with the five ad groups at Rp270.000 (`tests/test_manual_cpc.py`, `tests/test_undo_safety.py`). The full offline suite has 100 tests, all passing. Live tests are proposals only: **do not execute test 1**.
 
 | # | Test | Expected | Offline | Live |
 |---|---|---|---|---|

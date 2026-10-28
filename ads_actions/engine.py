@@ -66,10 +66,24 @@ class Engine:
 
     # -- helpers ---------------------------------------------------------------
 
-    def _ctx(self, session: Session, customer_id) -> Ctx:
+    def _ctx(self, session: Session, customer_id, undo_of: dict | None = None) -> Ctx:
         self.g.check_user(session.email)
         cid = self.g.check_customer(customer_id)
-        return Ctx(gw=session.make_gateway(cid), g=self.g)
+        return Ctx(gw=session.make_gateway(cid), g=self.g, undo_of=undo_of)
+
+    def _undo_live_mismatch(self, ctx: Ctx, original: dict) -> str | None:
+        """None if the live account still shows what ``original`` left behind."""
+        ct = planners.TYPES[original["type"]]
+        result = {"resource_names": (original.get("mutate_result") or {}).get("resource_names", []), "request_ids": []}
+        live = planners.undo_view(original, ct.after(ctx, original["request"], result))
+        left = planners.undo_view(original, original["after"])
+        if _canon(live) == _canon(left):
+            return None
+        return (
+            f"Undo refused, nothing changed: the live values no longer match what {original['change_id']} left behind "
+            "(the account was changed since). Make a normal proposal instead.\n"
+            f"Left behind: {_canon(left)[:400]}\nNow: {_canon(live)[:400]}"
+        )
 
     async def _new_id(self, doc: dict) -> str:
         for _ in range(20):
@@ -109,8 +123,9 @@ class Engine:
 
     # -- propose ---------------------------------------------------------------
 
-    async def propose(self, session: Session, customer_id, change_type: str, request: dict, undo_of: str | None = None) -> dict:
-        ctx = self._ctx(session, customer_id)
+    async def propose(self, session: Session, customer_id, change_type: str, request: dict, *, undo_doc: dict | None = None) -> dict:
+        """``undo_doc`` is passed only by propose_undo; tools can't reach it."""
+        ctx = self._ctx(session, customer_id, undo_doc)
         ct = planners.TYPES[change_type]
         plan: Plan = await asyncio.to_thread(ct.plan, ctx, request)
         validation = await asyncio.to_thread(ctx.gw.mutate, plan.operations, True)
@@ -134,7 +149,7 @@ class Engine:
             "user_email": session.email,
             "google_request_ids": list(validation.get("request_ids", [])),
             "error": None,
-            "undo_of": undo_of,
+            "undo_of": undo_doc["change_id"] if undo_doc else None,
         }
         await self._new_id(doc)
         view = self._proposal_view(doc)
@@ -150,9 +165,13 @@ class Engine:
             raise Refused(f"Change {change_id} was already undone by {doc['undone_by']}.")
         if not doc.get("after") or doc["after"].get("read_error"):
             raise Refused(f"Change {change_id} has no recorded after-state, so it can't be undone automatically.")
+        mismatch = await asyncio.to_thread(self._undo_live_mismatch, ctx, doc)
+        if mismatch:
+            raise Refused(mismatch)
+        # The undo request is built only from the audit-log entry, never from input.
         undo_type, undo_request = planners.TYPES[doc["type"]].inverse(doc)
         undo_request = {"customer_id": ctx.gw.customer_id, **undo_request}
-        return await self.propose(session, customer_id, undo_type, undo_request, undo_of=doc["change_id"])
+        return await self.propose(session, customer_id, undo_type, undo_request, undo_doc=doc)
 
     # -- execute ---------------------------------------------------------------
 
@@ -173,6 +192,27 @@ class Engine:
                 cid, {"status": "failed", "error": message, "failure_kind": kind, "failed_at": self.clock(), "failed_by": session.email, **extra}
             )
             raise Refused(message)
+
+        if doc.get("undo_of"):
+            original = await self.store.get(doc["undo_of"])
+            if not original or original["status"] not in EXECUTED:
+                await fail(f"Refused, nothing changed: the change being undone ({doc['undo_of']}) is missing or not executed.", "undo_mismatch")
+            if original.get("undone_by"):
+                await fail(f"Refused, nothing changed: {original['change_id']} was already undone by {original['undone_by']}.", "undo_mismatch")
+            expected_type, expected = planners.TYPES[original["type"]].inverse(original)
+            expected = {"customer_id": doc["customer_id"], **expected}
+            if expected_type != doc["type"] or _canon(expected) != _canon(doc["request"]):
+                await fail(
+                    f"Refused, nothing changed: this undo's values don't match the 'before' snapshot of {original['change_id']} in the audit log.",
+                    "undo_mismatch",
+                )
+            ctx.undo_of = original
+            try:
+                mismatch = await asyncio.to_thread(self._undo_live_mismatch, ctx, original)
+            except Exception as e:
+                await fail(f"Could not re-read the account, nothing changed: {e}", "read_error")
+            if mismatch:
+                await fail(mismatch, "undo_live_changed")
 
         ct = planners.TYPES[doc["type"]]
         try:
