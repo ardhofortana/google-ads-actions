@@ -22,12 +22,13 @@ INITIAL_SCHEDULE = [("MONDAY", 19, 24)] + [
 
 def seed_state() -> dict:
     ids = itertools.count(900001)
+    imported_bid = 270_000 * 1_000_000  # every ad group came in with Rp270.000
     ad_groups = {
-        "201460749979": {"name": "AI Integration Services", "status": "ENABLED"},
-        "201460750019": {"name": "AI Automation", "status": "ENABLED"},
-        "201460750059": {"name": "AI Consulting", "status": "ENABLED"},
-        "201460750219": {"name": "Custom AI Solutions", "status": "PAUSED"},
-        "201460750259": {"name": "AI Development Partner", "status": "PAUSED"},
+        "201460749979": {"name": "AI Integration Services", "status": "ENABLED", "cpc_bid_micros": imported_bid},
+        "201460750019": {"name": "AI Automation", "status": "ENABLED", "cpc_bid_micros": imported_bid},
+        "201460750059": {"name": "AI Consulting", "status": "ENABLED", "cpc_bid_micros": imported_bid},
+        "201460750219": {"name": "Custom AI Solutions", "status": "PAUSED", "cpc_bid_micros": imported_bid},
+        "201460750259": {"name": "AI Development Partner", "status": "PAUSED", "cpc_bid_micros": imported_bid},
     }
     keywords = {}
     for ag, text, mt in [
@@ -38,7 +39,7 @@ def seed_state() -> dict:
         ("201460750219", "custom ai solutions", "PHRASE"),
     ]:
         cid = str(next(ids))
-        keywords[(ag, cid)] = {"text": text, "match_type": mt, "status": "ENABLED"}
+        keywords[(ag, cid)] = {"text": text, "match_type": mt, "status": "ENABLED", "cpc_bid_micros": None}
     schedule = {
         str(next(ids)): {"day": d, "start_hour": a, "end_hour": b, "start_minute": "ZERO", "end_minute": "ZERO", "bid_modifier": None}
         for d, a, b in INITIAL_SCHEDULE
@@ -56,6 +57,7 @@ def seed_state() -> dict:
             "portfolio_bidding_strategy": None,
             "cpc_bid_ceiling_micros": 270_000 * 1_000_000,
             "target_cpa_micros": None,
+            "enhanced_cpc_enabled": False,
         },
         "ad_groups": ad_groups,
         "keywords": keywords,
@@ -74,6 +76,7 @@ def seed_state() -> dict:
             }
         },
         "assets": {},
+        "devices": {},
         "campaign_assets": {},
         "metrics_today": {"cost_micros": 400_000 * 1_000_000, "clicks": 30, "impressions": 900, "conversions": 1.0},
         "hourly": [],
@@ -103,13 +106,22 @@ class FakeAds:
             return []
         ags = self.state["ad_groups"]
         return [
-            {"ad_group_id": ag, "ad_group_name": ags[ag]["name"], "ad_group_status": ags[ag]["status"], "criterion_id": cid, **kw}
+            {"ad_group_id": ag, "ad_group_name": ags[ag]["name"], "ad_group_status": ags[ag]["status"], "criterion_id": cid,
+             "ad_group_cpc_bid_micros": ags[ag]["cpc_bid_micros"], **kw}
             for (ag, cid), kw in self.state["keywords"].items()
         ]
 
     def ad_group(self, ad_group_id):
         ag = self.state["ad_groups"].get(str(ad_group_id))
         return {"id": str(ad_group_id), "campaign_id": CAMPAIGN, **ag} if ag else None
+
+    def campaign_ad_groups(self, campaign_id):
+        if str(campaign_id) != CAMPAIGN:
+            return []
+        return [{"id": g, "campaign_id": CAMPAIGN, **copy.deepcopy(v)} for g, v in self.state["ad_groups"].items()]
+
+    def device_criteria(self, campaign_id):
+        return [{"device": d, **v} for d, v in self.state["devices"].items()]
 
     def ad_schedule(self, campaign_id):
         return [{"criterion_id": k, **v} for k, v in self.state["schedule"].items()]
@@ -169,12 +181,20 @@ class FakeAds:
 
     def _apply(self, st, op, temp):
         kind, action, body = ops.describe(op)
+        mask = next(iter(op.values())).get("update_mask", "").split(",")
         pre = f"customers/{CUSTOMER}/"
 
         def fail(msg):
             raise AdsApiError([msg], "fake-req-err")
 
         if kind == "campaign_criterion":
+            if action == "update":  # device bid adjustment; device criteria always exist
+                crit = body["resource_name"].rsplit("~", 1)[1]
+                device = {"30000": "DESKTOP", "30001": "MOBILE", "30002": "TABLET"}.get(crit)
+                if not device:
+                    fail(f"RESOURCE_NOT_FOUND {body['resource_name']}")
+                st["devices"][device] = {"criterion_id": crit, "bid_modifier": body.get("bid_modifier")}
+                return body["resource_name"]
             if action == "remove":
                 camp, crit = body.removeprefix(pre + "campaignCriteria/").split("~")
                 if crit in st["negatives"]:
@@ -207,10 +227,17 @@ class FakeAds:
             if action == "remove":
                 del st["keywords"][key]
             else:
-                st["keywords"][key]["status"] = body["status"]
+                if "status" in mask:
+                    st["keywords"][key]["status"] = body["status"]
+                if "cpcBidMicros" in mask:  # absent from the body = cleared
+                    st["keywords"][key]["cpc_bid_micros"] = int(body["cpc_bid_micros"]) if "cpc_bid_micros" in body else None
             return rn
         if kind == "ad_group":
-            st["ad_groups"][body["resource_name"].rsplit("/", 1)[1]]["status"] = body["status"]
+            ag = st["ad_groups"][body["resource_name"].rsplit("/", 1)[1]]
+            if "status" in mask:
+                ag["status"] = body["status"]
+            if "cpcBidMicros" in mask:
+                ag["cpc_bid_micros"] = int(body["cpc_bid_micros"])
             return body["resource_name"]
         if kind == "campaign":
             c = st["campaign"]
@@ -224,6 +251,10 @@ class FakeAds:
                 c["bidding_strategy_type"] = "MAXIMIZE_CONVERSIONS"
                 c["target_cpa_micros"] = int(body["maximize_conversions"].get("target_cpa_micros", 0)) or None
                 c["cpc_bid_ceiling_micros"] = None
+            if "manual_cpc" in body:
+                c["bidding_strategy_type"] = "MANUAL_CPC"
+                c["enhanced_cpc_enabled"] = bool(body["manual_cpc"].get("enhanced_cpc_enabled", False))
+                c["cpc_bid_ceiling_micros"] = c["target_cpa_micros"] = None
             return body["resource_name"]
         if kind == "campaign_budget":
             st["campaign"]["budget_amount_micros"] = int(body["amount_micros"])

@@ -7,6 +7,11 @@ currency: IDR
 budget_idr: {min: 300000, max: 1800000, max_change_pct_per_proposal: 50}
 cpc_ceiling_idr: {min: 50000, max: 400000}
 target_cpa_idr: {min: 1000000, max: 8000000}
+# Manual CPC: ad group and keyword max CPC bids. Change is measured against the
+# current bid (a keyword without its own bid: against its ad group's default).
+bid_idr: {min: 20000, max: 400000, max_change_pct_per_proposal: 50}
+max_keyword_bids_per_proposal: 20
+device_bid_adjustment_pct: {min: -50, max: 50}
 keyword_match_types: [PHRASE, EXACT]
 max_negatives_per_proposal: 50
 max_keywords_per_proposal: 20

@@ -31,7 +31,7 @@ SNIPPET_HEADERS = (
     "Service catalog", "Shows", "Styles", "Types",
 )
 PIN_FIELDS = ("HEADLINE_1", "HEADLINE_2", "HEADLINE_3", "DESCRIPTION_1", "DESCRIPTION_2")
-STRATEGY_FROM_API = {"TARGET_SPEND": "MAXIMIZE_CLICKS", "MAXIMIZE_CONVERSIONS": "MAXIMIZE_CONVERSIONS"}
+STRATEGY_FROM_API = {"TARGET_SPEND": "MAXIMIZE_CLICKS", "MAXIMIZE_CONVERSIONS": "MAXIMIZE_CONVERSIONS", "MANUAL_CPC": "MANUAL_CPC"}
 
 
 @dataclass
@@ -453,7 +453,7 @@ def plan_set_daily_budget(ctx: Ctx, req: dict) -> Plan:
     if amount == current:
         raise Refused(f"The daily budget is already Rp{current:,}.")
     pct = abs(amount - current) / current * 100 if current else float("inf")
-    if pct > ctx.g.budget_max_change_pct:
+    if pct > ctx.g.budget_max_change_pct and not req.get("restore"):  # undo restores a live value
         raise Refused(
             f"Rp{current:,} to Rp{amount:,} is a {pct:.0f}% change; the limit is "
             f"{ctx.g.budget_max_change_pct:g}% per proposal."
@@ -471,10 +471,17 @@ def after_set_daily_budget(ctx, req, result):
 
 
 def inverse_set_daily_budget(doc):
-    return "set_daily_budget", {"campaign_id": doc["request"]["campaign_id"], "amount_idr": doc["before"]["amount_micros"] // MICROS}
+    return "set_daily_budget", {"campaign_id": doc["request"]["campaign_id"], "amount_idr": doc["before"]["amount_micros"] // MICROS, "restore": True}
 
 
 # -- bidding ----------------------------------------------------------------------
+
+STRATEGIES = ("MAXIMIZE_CLICKS", "MAXIMIZE_CONVERSIONS", "MANUAL_CPC")
+DEVICE_CRITERION_IDS = {"DESKTOP": "30000", "MOBILE": "30001", "TABLET": "30002"}
+
+
+def _rp(micros) -> str:
+    return f"Rp{micros // MICROS:,}" if micros else "not set"
 
 
 def _bidding_label(strategy, ceiling_micros, cpa_micros) -> str:
@@ -482,65 +489,170 @@ def _bidding_label(strategy, ceiling_micros, cpa_micros) -> str:
         return "Maximize clicks" + (f", CPC ceiling Rp{ceiling_micros // MICROS:,}" if ceiling_micros else ", no CPC ceiling")
     if strategy == "MAXIMIZE_CONVERSIONS":
         return "Maximize conversions" + (f", target CPA Rp{cpa_micros // MICROS:,}" if cpa_micros else ", no target CPA")
+    if strategy == "MANUAL_CPC":
+        return "Manual CPC (Enhanced CPC off)"
     return strategy
+
+
+def _check_bid(ctx: Ctx, label: str, new_idr: int, current_micros: int | None, restore: bool = False) -> str:
+    """Range and per-proposal change limit for one bid. Returns the change as text."""
+    ctx.g.bid.check(f"{label}: bid", new_idr)
+    return _check_bid_change(ctx, label, new_idr * MICROS, current_micros, restore)
+
+
+def _check_bid_change(ctx: Ctx, label: str, new_micros: int, current_micros: int | None, restore: bool = False) -> str:
+    """``restore`` (set only by propose_undo) skips the ±% limit, never the range:
+    undoing a -50% change needs +100%, and the old value was live before."""
+    if not current_micros:
+        return "new"
+    pct = (new_micros - current_micros) / current_micros * 100
+    if abs(pct) > ctx.g.bid_max_change_pct and not restore:
+        raise Refused(
+            f"{label}: {_rp(current_micros)} to {_rp(new_micros)} is a {pct:+.0f}% change; "
+            f"the limit is ±{ctx.g.bid_max_change_pct:g}% per proposal."
+        )
+    return f"{pct:+.0f}%"
+
+
+def _require_manual_cpc(camp: dict, what: str) -> None:
+    if camp["bidding_strategy_type"] != "MANUAL_CPC":
+        current = _bidding_label(STRATEGY_FROM_API.get(camp["bidding_strategy_type"], camp["bidding_strategy_type"]), camp["cpc_bid_ceiling_micros"], camp["target_cpa_micros"])
+        raise Refused(
+            f"{what} is only allowed while the campaign uses Manual CPC (it uses {current}). "
+            "Under automated bidding the bid has no effect."
+        )
 
 
 def plan_set_bidding(ctx: Ctx, req: dict) -> Plan:
     camp = _campaign(ctx, req.get("campaign_id"))
     strategy = str(req.get("strategy", "")).strip().upper()
     ceiling, cpa = req.get("cpc_ceiling_idr"), req.get("target_cpa_idr")
-    if strategy not in ("MAXIMIZE_CLICKS", "MAXIMIZE_CONVERSIONS"):
-        raise Refused("strategy must be MAXIMIZE_CLICKS or MAXIMIZE_CONVERSIONS.")
+    default_cpc = req.get("ad_group_default_cpc_idr")
+    raw_bids = req.get("ad_group_bids") or {}
+    only_listed = bool(req.get("only_listed_ad_groups"))  # set by propose_undo only
+    restore = bool(req.get("restore"))  # set by propose_undo only
+    if strategy not in STRATEGIES:
+        raise Refused("strategy must be MAXIMIZE_CLICKS, MAXIMIZE_CONVERSIONS or MANUAL_CPC.")
     if camp["portfolio_bidding_strategy"]:
         raise Refused("The campaign uses a portfolio bid strategy; changing it is not allowed here.")
-    if strategy == "MAXIMIZE_CLICKS":
-        if cpa is not None:
-            raise Refused("target_cpa_idr only applies to MAXIMIZE_CONVERSIONS.")
-        if ceiling is not None:
-            ctx.g.cpc_ceiling.check("CPC ceiling", _int(ceiling, "cpc_ceiling_idr"))
+    if strategy != "MAXIMIZE_CLICKS" and ceiling is not None:
+        raise Refused("cpc_ceiling_idr only applies to MAXIMIZE_CLICKS.")
+    if strategy != "MAXIMIZE_CONVERSIONS" and cpa is not None:
+        raise Refused("target_cpa_idr only applies to MAXIMIZE_CONVERSIONS.")
+    if ceiling is not None:
+        ctx.g.cpc_ceiling.check("CPC ceiling", _int(ceiling, "cpc_ceiling_idr"))
+    if cpa is not None:
+        ctx.g.target_cpa.check("Target CPA", _int(cpa, "target_cpa_idr"))
+    if strategy == "MANUAL_CPC":
+        if default_cpc is None and not only_listed:
+            raise Refused(
+                "ad_group_default_cpc_idr is required for MANUAL_CPC: it replaces the current ad group bids, "
+                "so Manual CPC never runs on the old ones."
+            )
     else:
-        if ceiling is not None:
-            raise Refused("cpc_ceiling_idr only applies to MAXIMIZE_CLICKS.")
-        if cpa is not None:
-            ctx.g.target_cpa.check("Target CPA", _int(cpa, "target_cpa_idr"))
+        if default_cpc is not None:
+            raise Refused("ad_group_default_cpc_idr only applies to MANUAL_CPC.")
+        if raw_bids and not only_listed:
+            raise Refused("ad_group_bids only applies to MANUAL_CPC.")
+    if not isinstance(raw_bids, dict):
+        raise Refused("ad_group_bids must be an object of {ad_group_id: cpc_idr}.")
+    if default_cpc is not None:
+        default_cpc = _int(default_cpc, "ad_group_default_cpc_idr")
+
+    groups = {g["id"]: g for g in ctx.gw.campaign_ad_groups(camp["id"])}
+    bids = {}
+    for k, v in raw_bids.items():
+        gid = _id(k, "ad_group_bids key")
+        if gid not in groups:
+            raise Refused(f"Ad group {gid} is not in campaign {camp['id']}.")
+        bids[gid] = _int(v, f"bid for ad group {gid}")
+    enabled = sorted(g for g, info in groups.items() if info["status"] == "ENABLED")
+
+    # Enabled ad groups get the default; ad_group_bids override it, and are the
+    # only way to change a paused ad group.
+    targets = {} if (only_listed or default_cpc is None) else {g: default_cpc for g in enabled}
+    targets.update(bids)
+    changes = {}
+    for gid in sorted(targets):
+        g = groups[gid]
+        new = targets[gid]
+        if g["cpc_bid_micros"] != new * MICROS:
+            changes[gid] = (new, _check_bid(ctx, f"Ad group {g['name']}", new, g["cpc_bid_micros"], restore))
 
     cur_strategy = STRATEGY_FROM_API.get(camp["bidding_strategy_type"], camp["bidding_strategy_type"])
     cur_ceiling, cur_cpa = camp["cpc_bid_ceiling_micros"], camp["target_cpa_micros"]
     new_ceiling = ceiling * MICROS if ceiling is not None else None
     new_cpa = cpa * MICROS if cpa is not None else None
     same_strategy = cur_strategy == strategy
-    if same_strategy and (
+    campaign_unchanged = same_strategy and (
         (strategy == "MAXIMIZE_CLICKS" and cur_ceiling == new_ceiling)
         or (strategy == "MAXIMIZE_CONVERSIONS" and cur_cpa == new_cpa)
-    ):
+        or (strategy == "MANUAL_CPC" and not camp.get("enhanced_cpc_enabled"))
+    )
+    if campaign_unchanged and not changes:
         raise Refused("Bidding is already set that way.")
 
-    resource = {"resource_name": ctx.rn.campaign(camp["id"])}
-    if strategy == "MAXIMIZE_CLICKS":
-        resource["target_spend"] = {"cpc_bid_ceiling_micros": str(new_ceiling)} if new_ceiling else {}
-        mask = ["target_spend.cpc_bid_ceiling_micros"] if new_ceiling or same_strategy else ["target_spend"]
-    else:
-        resource["maximize_conversions"] = {"target_cpa_micros": str(new_cpa)} if new_cpa else {}
-        mask = ["maximize_conversions.target_cpa_micros"] if new_cpa or same_strategy else ["maximize_conversions"]
+    operations, rows, warnings, skipped = [], [], [], []
+    rn = ctx.rn
+    for gid, (new, change) in changes.items():
+        g = groups[gid]
+        operations.append(ops.update("ad_group", {"resource_name": rn.ad_group(gid), "cpc_bid_micros": str(new * MICROS)}, ["cpc_bid_micros"]))
+        rows.append({"item": f"Ad group {g['name']} ({gid}), default max CPC", "before": _rp(g["cpc_bid_micros"]), "after": f"Rp{new:,} ({change})"})
+    if not campaign_unchanged:
+        resource = {"resource_name": rn.campaign(camp["id"])}
+        if strategy == "MAXIMIZE_CLICKS":
+            resource["target_spend"] = {"cpc_bid_ceiling_micros": str(new_ceiling)} if new_ceiling else {}
+            mask = ["target_spend.cpc_bid_ceiling_micros"] if new_ceiling or same_strategy else ["target_spend"]
+        elif strategy == "MAXIMIZE_CONVERSIONS":
+            resource["maximize_conversions"] = {"target_cpa_micros": str(new_cpa)} if new_cpa else {}
+            mask = ["maximize_conversions.target_cpa_micros"] if new_cpa or same_strategy else ["maximize_conversions"]
+        else:
+            resource["manual_cpc"] = {"enhanced_cpc_enabled": False}
+            mask = ["manual_cpc.enhanced_cpc_enabled"]
+        operations.append(ops.update("campaign", resource, mask))
+        rows.insert(0, {"item": f"Bidding, {camp['name']}", "before": _bidding_label(cur_strategy, cur_ceiling, cur_cpa), "after": _bidding_label(strategy, new_ceiling, new_cpa)})
+        if strategy != "MANUAL_CPC" and not same_strategy:
+            warnings.append("Switching bid strategy restarts Smart Bidding learning.")
 
-    warnings = []
-    if not same_strategy:
-        warnings.append("Switching bid strategy restarts Smart Bidding learning.")
+    if strategy == "MANUAL_CPC" and not only_listed:
+        for gid, g in sorted(groups.items()):
+            if gid not in targets:
+                skipped.append(f"Ad group {g['name']} ({g['status'].lower()}) not changed: stays at {_rp(g['cpc_bid_micros'])}")
+        own = [k for k in ctx.gw.campaign_keywords(camp["id"]) if k["cpc_bid_micros"] and k["ad_group_id"] in targets]
+        if own:
+            names = ", ".join(f'"{k["text"]}" {_rp(k["cpc_bid_micros"])}' for k in own[:5])
+            warnings.append(f"{len(own)} keyword(s) have their own bid and keep it ({names}). Change them with propose_set_keyword_cpc.")
+
+    snapshot = sorted(set(enabled) | set(targets))
     return Plan(
-        summary=f"Set bidding of {camp['name']} to {_bidding_label(strategy, new_ceiling, new_cpa)}",
-        before={"bidding_strategy_type": camp["bidding_strategy_type"], "cpc_bid_ceiling_micros": cur_ceiling, "target_cpa_micros": cur_cpa},
-        operations=[ops.update("campaign", resource, mask)],
-        rows=_status_rows(f"Bidding, {camp['name']}", _bidding_label(cur_strategy, cur_ceiling, cur_cpa), _bidding_label(strategy, new_ceiling, new_cpa)),
+        summary=f"Set bidding of {camp['name']} to {_bidding_label(strategy, new_ceiling, new_cpa)}"
+        + (f", {len(changes)} ad group bid(s) changed" if changes else "")
+        + (" (one atomic change)" if changes and not campaign_unchanged else ""),
+        before={
+            "bidding_strategy_type": camp["bidding_strategy_type"],
+            "cpc_bid_ceiling_micros": cur_ceiling,
+            "target_cpa_micros": cur_cpa,
+            "enhanced_cpc_enabled": bool(camp.get("enhanced_cpc_enabled")),
+            "ad_groups": [{"ad_group_id": g, "status": groups[g]["status"], "cpc_bid_micros": groups[g]["cpc_bid_micros"]} for g in snapshot],
+        },
+        # Ad group bids first, then the strategy switch; all in one atomic mutate.
+        operations=operations,
+        rows=rows,
         warnings=warnings,
+        skipped=skipped,
     )
 
 
 def after_set_bidding(ctx, req, result):
     c = ctx.gw.campaign(str(req["campaign_id"]))
-    return {k: c[k] for k in ("bidding_strategy_type", "cpc_bid_ceiling_micros", "target_cpa_micros")}
+    groups = ctx.gw.campaign_ad_groups(c["id"])
+    out = {k: c[k] for k in ("bidding_strategy_type", "cpc_bid_ceiling_micros", "target_cpa_micros", "enhanced_cpc_enabled")}
+    out["ad_groups"] = [{"ad_group_id": g["id"], "status": g["status"], "cpc_bid_micros": g["cpc_bid_micros"]} for g in sorted(groups, key=lambda g: g["id"])]
+    return out
 
 
 def inverse_set_bidding(doc):
+    """Previous strategy and previous ad group bids, as one atomic proposal."""
     b = doc["before"]
     strategy = STRATEGY_FROM_API.get(b["bidding_strategy_type"])
     if not strategy:
@@ -550,7 +662,160 @@ def inverse_set_bidding(doc):
         req["cpc_ceiling_idr"] = b["cpc_bid_ceiling_micros"] // MICROS
     if strategy == "MAXIMIZE_CONVERSIONS" and b["target_cpa_micros"]:
         req["target_cpa_idr"] = b["target_cpa_micros"] // MICROS
+    after = {g["ad_group_id"]: g["cpc_bid_micros"] for g in (doc.get("after") or {}).get("ad_groups", [])}
+    changed = {
+        g["ad_group_id"]: g["cpc_bid_micros"] // MICROS
+        for g in b.get("ad_groups", [])
+        if g["cpc_bid_micros"] and after.get(g["ad_group_id"]) != g["cpc_bid_micros"]
+    }
+    req["ad_group_bids"] = changed
+    req["only_listed_ad_groups"] = True
+    req["restore"] = True
     return "set_bidding", req
+
+
+def plan_set_ad_group_cpc(ctx: Ctx, req: dict) -> Plan:
+    ag = _ad_group(ctx, req.get("ad_group_id"))
+    camp = _campaign(ctx, ag["campaign_id"])
+    _require_manual_cpc(camp, "Changing an ad group's max CPC")
+    new = _int(req.get("cpc_idr"), "cpc_idr")
+    if ag["cpc_bid_micros"] == new * MICROS:
+        raise Refused(f"Ad group {ag['name']} is already at Rp{new:,}.")
+    change = _check_bid(ctx, f"Ad group {ag['name']}", new, ag["cpc_bid_micros"], bool(req.get("restore")))
+    return Plan(
+        summary=f"Set default max CPC of ad group {ag['name']} to Rp{new:,}",
+        before={"bidding_strategy_type": camp["bidding_strategy_type"], "cpc_bid_micros": ag["cpc_bid_micros"]},
+        operations=[ops.update("ad_group", {"resource_name": ctx.rn.ad_group(ag["id"]), "cpc_bid_micros": str(new * MICROS)}, ["cpc_bid_micros"])],
+        rows=_status_rows(f"Ad group {ag['name']} ({ag['id']}), default max CPC", _rp(ag["cpc_bid_micros"]), f"Rp{new:,} ({change})"),
+    )
+
+
+def after_set_ad_group_cpc(ctx, req, result):
+    return {"cpc_bid_micros": ctx.gw.ad_group(str(req["ad_group_id"]))["cpc_bid_micros"]}
+
+
+def inverse_set_ad_group_cpc(doc):
+    if not doc["before"]["cpc_bid_micros"]:
+        raise Refused("The ad group had no default bid before; set one with propose_set_ad_group_cpc.")
+    return "set_ad_group_cpc", {"ad_group_id": doc["request"]["ad_group_id"], "cpc_idr": doc["before"]["cpc_bid_micros"] // MICROS, "restore": True}
+
+
+def plan_set_keyword_cpc(ctx: Ctx, req: dict) -> Plan:
+    items = req.get("items")
+    if not isinstance(items, list) or not items:
+        raise Refused("items must be a non-empty list of {ad_group_id, criterion_id, cpc_idr}.")
+    if len(items) > ctx.g.max_keyword_bids_per_proposal:
+        raise Refused(f"{len(items)} keywords given; the limit is {ctx.g.max_keyword_bids_per_proposal} per proposal.")
+    cache, parsed, seen = {}, [], set()
+    for it in items:
+        if not isinstance(it, dict):
+            raise Refused("Each item must be {ad_group_id, criterion_id, cpc_idr}.")
+        ag_id = _id(it.get("ad_group_id"), "ad_group_id")
+        crit = _id(it.get("criterion_id"), "criterion_id")
+        if (ag_id, crit) in seen:
+            raise Refused(f"Keyword {crit} in ad group {ag_id} is listed twice.")
+        seen.add((ag_id, crit))
+        if ag_id not in cache:
+            cache[ag_id] = _keywords_in_group(ctx, ag_id)
+        ag, kws = cache[ag_id]
+        kw = kws.get(crit)
+        if not kw:
+            raise Refused(f"Keyword {crit} is not in ad group {ag_id}.")
+        cpc = it.get("cpc_idr")
+        cpc = None if cpc in (None, 0) else _int(cpc, "cpc_idr")
+        parsed.append((ag, kw, cpc))
+
+    camp = _campaign(ctx, parsed[0][0]["campaign_id"])
+    _require_manual_cpc(camp, "Changing keyword bids")
+
+    operations, rows, before, skipped = [], [], [], []
+    rn = ctx.rn
+    restore = bool(req.get("restore"))
+    for ag, kw, cpc in parsed:
+        own, default = kw["cpc_bid_micros"], kw["ad_group_cpc_bid_micros"]
+        label = f'Keyword "{kw["text"]}" ({kw["match_type"]}) in {ag["name"]}'
+        current = f"{_rp(own)} (own bid)" if own else f"ad group default {_rp(default)}"
+        if cpc is None:
+            if not own:
+                skipped.append(f"{label} has no own bid; nothing to remove")
+                continue
+            change = _check_bid_change(ctx, label, default, own, restore) if default else "n/a"
+            after_label = f"ad group default {_rp(default)} ({change})"
+            resource = {"resource_name": rn.ad_group_criterion(ag["id"], kw["criterion_id"])}  # field left out = cleared
+        else:
+            if own == cpc * MICROS:
+                skipped.append(f"{label} is already at Rp{cpc:,}")
+                continue
+            change = _check_bid(ctx, label, cpc, own or default, restore)
+            after_label = f"Rp{cpc:,} (own bid, {change})"
+            resource = {"resource_name": rn.ad_group_criterion(ag["id"], kw["criterion_id"]), "cpc_bid_micros": str(cpc * MICROS)}
+        operations.append(ops.update("ad_group_criterion", resource, ["cpc_bid_micros"]))
+        rows.append({"item": label, "before": current, "after": after_label})
+        before.append({"ad_group_id": ag["id"], "criterion_id": kw["criterion_id"], "cpc_bid_micros": own, "ad_group_cpc_bid_micros": default})
+    if not operations:
+        raise Refused("Nothing to change. " + " ".join(skipped))
+    return Plan(
+        summary=f"Set max CPC of {len(operations)} keyword(s)",
+        before={"bidding_strategy_type": camp["bidding_strategy_type"], "keywords": before},
+        operations=operations,
+        rows=rows,
+        skipped=skipped,
+    )
+
+
+def after_set_keyword_cpc(ctx, req, result):
+    out = []
+    for it in req["items"]:
+        _, kws = _keywords_in_group(ctx, it["ad_group_id"])
+        kw = kws.get(str(it["criterion_id"]), {})
+        out.append({"ad_group_id": str(it["ad_group_id"]), "criterion_id": str(it["criterion_id"]), "cpc_bid_micros": kw.get("cpc_bid_micros")})
+    return {"keywords": out}
+
+
+def inverse_set_keyword_cpc(doc):
+    items = [
+        {"ad_group_id": k["ad_group_id"], "criterion_id": k["criterion_id"], "cpc_idr": (k["cpc_bid_micros"] // MICROS) if k["cpc_bid_micros"] else 0}
+        for k in doc["before"]["keywords"]
+    ]
+    return "set_keyword_cpc", {"items": items, "restore": True}
+
+
+def _device_pct(modifier) -> int:
+    return round((modifier - 1) * 100) if modifier else 0
+
+
+def plan_set_device_bid_adjustment(ctx: Ctx, req: dict) -> Plan:
+    camp = _campaign(ctx, req.get("campaign_id"))
+    device = str(req.get("device", "")).strip().upper()
+    if device not in DEVICE_CRITERION_IDS:
+        raise Refused("device must be DESKTOP, MOBILE or TABLET.")
+    pct = _int(req.get("percent"), "percent")
+    lo, hi = ctx.g.device_adjustment_pct.min, ctx.g.device_adjustment_pct.max
+    if not lo <= pct <= hi:
+        raise Refused(f"Device bid adjustment {pct:+d}% is outside the allowed range {lo:+d}% to {hi:+d}%.")
+    _require_manual_cpc(camp, "A device bid adjustment")
+    live = {d["device"]: d for d in ctx.gw.device_criteria(camp["id"])}
+    cur = live.get(device)
+    cur_mod = cur["bid_modifier"] if cur else None
+    if _device_pct(cur_mod) == pct:
+        raise Refused(f"{device.title()} is already at {pct:+d}%.")
+    crit = cur["criterion_id"] if cur else DEVICE_CRITERION_IDS[device]
+    new_mod = round(1 + pct / 100, 2)
+    return Plan(
+        summary=f"Set {device.lower()} bid adjustment of {camp['name']} to {pct:+d}%",
+        before={"bidding_strategy_type": camp["bidding_strategy_type"], "device": device, "bid_modifier": cur_mod},
+        operations=[ops.update("campaign_criterion", {"resource_name": ctx.rn.campaign_criterion(camp["id"], crit), "bid_modifier": new_mod}, ["bid_modifier"])],
+        rows=_status_rows(f"{device.title()} bid adjustment, {camp['name']}", f"{_device_pct(cur_mod):+d}%", f"{pct:+d}% (bid x{new_mod:g})"),
+    )
+
+
+def after_set_device_bid_adjustment(ctx, req, result):
+    live = {d["device"]: d for d in ctx.gw.device_criteria(str(req["campaign_id"]))}
+    return {"bid_modifier": (live.get(str(req["device"]).upper()) or {}).get("bid_modifier")}
+
+
+def inverse_set_device_bid_adjustment(doc):
+    return "set_device_bid_adjustment", {"campaign_id": doc["request"]["campaign_id"], "device": doc["before"]["device"], "percent": _device_pct(doc["before"]["bid_modifier"])}
 
 
 # -- ad schedule ------------------------------------------------------------------
@@ -954,6 +1219,9 @@ TYPES: dict[str, ChangeType] = {
     "set_campaign_status": ChangeType(plan_set_campaign_status, after_set_campaign_status, inverse_set_campaign_status),
     "set_daily_budget": ChangeType(plan_set_daily_budget, after_set_daily_budget, inverse_set_daily_budget),
     "set_bidding": ChangeType(plan_set_bidding, after_set_bidding, inverse_set_bidding),
+    "set_ad_group_cpc": ChangeType(plan_set_ad_group_cpc, after_set_ad_group_cpc, inverse_set_ad_group_cpc),
+    "set_keyword_cpc": ChangeType(plan_set_keyword_cpc, after_set_keyword_cpc, inverse_set_keyword_cpc),
+    "set_device_bid_adjustment": ChangeType(plan_set_device_bid_adjustment, after_set_device_bid_adjustment, inverse_set_device_bid_adjustment),
     "set_ad_schedule": ChangeType(plan_set_ad_schedule, after_ad_schedule, inverse_ad_schedule),
     "shift_ad_schedule": ChangeType(plan_shift_ad_schedule, after_ad_schedule, inverse_ad_schedule),
     "update_rsa": ChangeType(plan_update_rsa, after_update_rsa, inverse_update_rsa),

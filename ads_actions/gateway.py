@@ -31,6 +31,8 @@ class Gateway(Protocol):
     def campaign_negatives(self, campaign_id: str) -> list[dict]: ...
     def campaign_keywords(self, campaign_id: str) -> list[dict]: ...
     def ad_group(self, ad_group_id: str) -> dict | None: ...
+    def campaign_ad_groups(self, campaign_id: str) -> list[dict]: ...
+    def device_criteria(self, campaign_id: str) -> list[dict]: ...
     def ad_schedule(self, campaign_id: str) -> list[dict]: ...
     def rsa(self, ad_id: str) -> dict | None: ...
     def campaign_assets(self, campaign_id: str) -> list[dict]: ...
@@ -49,6 +51,7 @@ SELECT campaign.id, campaign.name, campaign.status, campaign.campaign_budget,
   campaign.bidding_strategy_type, campaign.bidding_strategy,
   campaign.target_spend.cpc_bid_ceiling_micros,
   campaign.maximize_conversions.target_cpa_micros,
+  campaign.manual_cpc.enhanced_cpc_enabled,
   campaign_budget.resource_name, campaign_budget.amount_micros,
   campaign_budget.explicitly_shared, campaign_budget.reference_count
 FROM campaign WHERE campaign.id = {campaign_id}"""
@@ -61,17 +64,29 @@ WHERE campaign.id = {campaign_id} AND campaign_criterion.type = KEYWORD
   AND campaign_criterion.negative = TRUE AND campaign_criterion.status != REMOVED"""
 
 Q_KEYWORDS = """
-SELECT campaign.id, ad_group.id, ad_group.name, ad_group.status,
+SELECT campaign.id, ad_group.id, ad_group.name, ad_group.status, ad_group.cpc_bid_micros,
   ad_group_criterion.criterion_id, ad_group_criterion.keyword.text,
-  ad_group_criterion.keyword.match_type, ad_group_criterion.status
+  ad_group_criterion.keyword.match_type, ad_group_criterion.status,
+  ad_group_criterion.cpc_bid_micros
 FROM ad_group_criterion
 WHERE campaign.id = {campaign_id} AND ad_group_criterion.type = KEYWORD
   AND ad_group_criterion.negative = FALSE AND ad_group_criterion.status != REMOVED
   AND ad_group.status != REMOVED"""
 
 Q_AD_GROUP = """
-SELECT ad_group.id, ad_group.name, ad_group.status, campaign.id
+SELECT ad_group.id, ad_group.name, ad_group.status, ad_group.cpc_bid_micros, campaign.id
 FROM ad_group WHERE ad_group.id = {ad_group_id}"""
+
+Q_AD_GROUPS = """
+SELECT campaign.id, ad_group.id, ad_group.name, ad_group.status, ad_group.cpc_bid_micros
+FROM ad_group WHERE campaign.id = {campaign_id} AND ad_group.status != REMOVED"""
+
+Q_DEVICES = """
+SELECT campaign.id, campaign_criterion.criterion_id, campaign_criterion.device.type,
+  campaign_criterion.bid_modifier
+FROM campaign_criterion
+WHERE campaign.id = {campaign_id} AND campaign_criterion.type = DEVICE
+  AND campaign_criterion.status != REMOVED"""
 
 Q_SCHEDULE = """
 SELECT campaign.id, campaign_criterion.criterion_id, campaign_criterion.ad_schedule.day_of_week,
@@ -111,7 +126,7 @@ SELECT segments.date, segments.hour, metrics.clicks, metrics.impressions,
 FROM campaign WHERE campaign.id = {campaign_id}
   AND segments.date BETWEEN '{start_date}' AND '{end_date}'"""
 
-ALL_QUERIES = [Q_CAMPAIGN, Q_NEGATIVES, Q_KEYWORDS, Q_AD_GROUP, Q_SCHEDULE, Q_RSA, Q_ASSETS, Q_TIME_ZONE, Q_TODAY, Q_HOURLY]
+ALL_QUERIES = [Q_CAMPAIGN, Q_NEGATIVES, Q_KEYWORDS, Q_AD_GROUP, Q_AD_GROUPS, Q_DEVICES, Q_SCHEDULE, Q_RSA, Q_ASSETS, Q_TIME_ZONE, Q_TODAY, Q_HOURLY]
 
 
 class _RequestIdRecorder(grpc.UnaryUnaryClientInterceptor):
@@ -195,6 +210,7 @@ class GoogleAdsGateway:
             "portfolio_bidding_strategy": c.bidding_strategy or None,
             "cpc_bid_ceiling_micros": int(c.target_spend.cpc_bid_ceiling_micros) or None,
             "target_cpa_micros": int(c.maximize_conversions.target_cpa_micros) or None,
+            "enhanced_cpc_enabled": bool(c.manual_cpc.enhanced_cpc_enabled),
         }
 
     def campaign_negatives(self, campaign_id):
@@ -219,6 +235,8 @@ class GoogleAdsGateway:
                 "text": r.ad_group_criterion.keyword.text,
                 "match_type": _enum(r.ad_group_criterion.keyword.match_type),
                 "status": _enum(r.ad_group_criterion.status),
+                "cpc_bid_micros": int(r.ad_group_criterion.cpc_bid_micros) or None,  # own bid; None = ad group default
+                "ad_group_cpc_bid_micros": int(r.ad_group.cpc_bid_micros) or None,
             }
             for r in rows
         ]
@@ -227,13 +245,30 @@ class GoogleAdsGateway:
         rows = self._search(Q_AD_GROUP.format(ad_group_id=_digits(ad_group_id)))
         if not rows:
             return None
-        r = rows[0]
+        return self._ad_group_row(rows[0])
+
+    @staticmethod
+    def _ad_group_row(r) -> dict:
         return {
             "id": str(r.ad_group.id),
             "name": r.ad_group.name,
             "status": _enum(r.ad_group.status),
             "campaign_id": str(r.campaign.id),
+            "cpc_bid_micros": int(r.ad_group.cpc_bid_micros) or None,
         }
+
+    def campaign_ad_groups(self, campaign_id):
+        rows = self._search(Q_AD_GROUPS.format(campaign_id=_digits(campaign_id)))
+        return [self._ad_group_row(r) for r in rows]
+
+    def device_criteria(self, campaign_id):
+        rows = self._search(Q_DEVICES.format(campaign_id=_digits(campaign_id)))
+        out = []
+        for r in rows:
+            cc = r.campaign_criterion
+            mod = cc.bid_modifier if "bid_modifier" in cc else None
+            out.append({"criterion_id": str(cc.criterion_id), "device": _enum(cc.device.type_), "bid_modifier": float(mod) if mod else None})
+        return out
 
     def ad_schedule(self, campaign_id):
         rows = self._search(Q_SCHEDULE.format(campaign_id=_digits(campaign_id)))

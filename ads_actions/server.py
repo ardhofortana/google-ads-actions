@@ -232,12 +232,52 @@ def build_server(engine: Engine, auth=None, make_gateway=None) -> FastMCP:
     async def propose_set_bidding(
         customer_id: CustomerId,
         campaign_id: CampaignId,
-        strategy: Literal["MAXIMIZE_CLICKS", "MAXIMIZE_CONVERSIONS"],
+        strategy: Literal["MAXIMIZE_CLICKS", "MAXIMIZE_CONVERSIONS", "MANUAL_CPC"],
         cpc_ceiling_idr: Annotated[int | None, Field(description="Max CPC for MAXIMIZE_CLICKS, in rupiah. None for no ceiling.")] = None,
         target_cpa_idr: Annotated[int | None, Field(description="Target CPA for MAXIMIZE_CONVERSIONS, in rupiah. None for no target.")] = None,
+        ad_group_default_cpc_idr: Annotated[int | None, Field(description="MANUAL_CPC only, required: new default max CPC for every enabled ad group, in rupiah (Rp20,000 to Rp400,000, at most ±50% from each current bid).")] = None,
+        ad_group_bids: Annotated[dict[str, int] | None, Field(description='MANUAL_CPC only: {ad_group_id: cpc_idr} overrides for listed ad groups. The only way to change a paused ad group.')] = None,
     ) -> dict:
-        """Proposes a bidding change (Maximize clicks with optional CPC ceiling, or Maximize conversions with optional target CPA)."""
-        return await propose("set_bidding", customer_id, {"campaign_id": campaign_id, "strategy": strategy, "cpc_ceiling_idr": cpc_ceiling_idr, "target_cpa_idr": target_cpa_idr})
+        """Proposes a bidding change: Maximize clicks (optional CPC ceiling), Maximize conversions (optional target CPA), or Manual CPC.
+
+        MANUAL_CPC sets Enhanced CPC off and changes the campaign strategy and every enabled ad group's default bid in ONE atomic change, so Manual CPC never runs on the old bids.
+        """
+        return await propose(
+            "set_bidding",
+            customer_id,
+            {
+                "campaign_id": campaign_id, "strategy": strategy, "cpc_ceiling_idr": cpc_ceiling_idr, "target_cpa_idr": target_cpa_idr,
+                "ad_group_default_cpc_idr": ad_group_default_cpc_idr, "ad_group_bids": ad_group_bids,
+            },
+        )
+
+    @mcp.tool(annotations=dry)
+    async def propose_set_ad_group_cpc(customer_id: CustomerId, ad_group_id: str, cpc_idr: Annotated[int, Field(description="New default max CPC in rupiah (Rp20,000 to Rp400,000, at most ±50% from the current bid).")]) -> dict:
+        """Proposes a new default max CPC for one ad group. Only while the campaign uses Manual CPC."""
+        return await propose("set_ad_group_cpc", customer_id, {"ad_group_id": ad_group_id, "cpc_idr": cpc_idr})
+
+    @mcp.tool(annotations=dry)
+    async def propose_set_keyword_cpc(
+        customer_id: CustomerId,
+        items: Annotated[list[dict] | None, Field(description='Up to 20 items like {"ad_group_id": "...", "criterion_id": "...", "cpc_idr": 250000}. cpc_idr 0 or null removes the keyword\'s own bid so it uses the ad group default.')] = None,
+        ad_group_id: Annotated[str | None, Field(description="Single-keyword form: use instead of items.")] = None,
+        criterion_id: Annotated[str | None, Field(description="Single-keyword form.")] = None,
+        cpc_idr: Annotated[int | None, Field(description="Single-keyword form. 0 or null removes the keyword's own bid.")] = None,
+    ) -> dict:
+        """Proposes keyword-level max CPC bids. Only while the campaign uses Manual CPC. Each bid Rp20,000 to Rp400,000 and at most ±50% from the current bid (the ad group default if the keyword has none)."""
+        if items is None:
+            items = [{"ad_group_id": ad_group_id, "criterion_id": criterion_id, "cpc_idr": cpc_idr}]
+        return await propose("set_keyword_cpc", customer_id, {"items": items})
+
+    @mcp.tool(annotations=dry)
+    async def propose_set_device_bid_adjustment(
+        customer_id: CustomerId,
+        campaign_id: CampaignId,
+        device: Literal["DESKTOP", "MOBILE", "TABLET"],
+        percent: Annotated[int, Field(description="Bid adjustment from -50 to +50 (0 removes it).")],
+    ) -> dict:
+        """Proposes a campaign device bid adjustment. Only while the campaign uses Manual CPC."""
+        return await propose("set_device_bid_adjustment", customer_id, {"campaign_id": campaign_id, "device": device, "percent": percent})
 
     # -- ad schedule ------------------------------------------------------
 

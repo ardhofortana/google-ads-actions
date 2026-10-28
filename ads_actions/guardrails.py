@@ -32,6 +32,10 @@ class Guardrails:
     budget_max_change_pct: float
     cpc_ceiling: Range
     target_cpa: Range
+    bid: Range
+    bid_max_change_pct: float
+    max_keyword_bids_per_proposal: int
+    device_adjustment_pct: Range
     keyword_match_types: tuple[str, ...]
     max_negatives_per_proposal: int
     max_keywords_per_proposal: int
@@ -57,6 +61,10 @@ class Guardrails:
             budget_max_change_pct=float(budget["max_change_pct_per_proposal"]),
             cpc_ceiling=Range(int(d["cpc_ceiling_idr"]["min"]), int(d["cpc_ceiling_idr"]["max"])),
             target_cpa=Range(int(d["target_cpa_idr"]["min"]), int(d["target_cpa_idr"]["max"])),
+            bid=Range(int(d["bid_idr"]["min"]), int(d["bid_idr"]["max"])),
+            bid_max_change_pct=float(d["bid_idr"]["max_change_pct_per_proposal"]),
+            max_keyword_bids_per_proposal=int(d["max_keyword_bids_per_proposal"]),
+            device_adjustment_pct=Range(int(d["device_bid_adjustment_pct"]["min"]), int(d["device_bid_adjustment_pct"]["max"])),
             keyword_match_types=tuple(d["keyword_match_types"]),
             max_negatives_per_proposal=int(d["max_negatives_per_proposal"]),
             max_keywords_per_proposal=int(d["max_keywords_per_proposal"]),

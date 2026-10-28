@@ -104,7 +104,7 @@ async def test_bidding_and_status_guardrails(env):
     for req, why in [
         ({"strategy": "MAXIMIZE_CLICKS", "cpc_ceiling_idr": 500_000}, "outside the allowed range"),
         ({"strategy": "MAXIMIZE_CONVERSIONS", "target_cpa_idr": 500_000}, "outside the allowed range"),
-        ({"strategy": "TARGET_ROAS"}, "MAXIMIZE_CLICKS or MAXIMIZE_CONVERSIONS"),
+        ({"strategy": "TARGET_ROAS"}, "MAXIMIZE_CONVERSIONS or MANUAL_CPC"),
         ({"strategy": "MAXIMIZE_CLICKS", "cpc_ceiling_idr": 270_000}, "already"),
     ]:
         with pytest.raises(Refused, match=why):
